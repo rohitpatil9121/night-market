@@ -1,10 +1,12 @@
 import { Game, PostFX, Audio } from "../engine/index.js";
-import { NIGHT, STALLS, STALL_TYPES, LEVELS, TRAITS, REGULARS, HINTS, ECON, STREET, VENDOR } from "./data.js";
+import { NIGHT, STALLS, STALL_TYPES, LEVELS, TRAITS, REGULARS, HINTS, ECON, STREET, VENDOR, MANAGERS, MANAGER_IDS } from "./data.js";
 import * as sim from "./sim.js";
 import { describeEvent, resolveEvent } from "./events.js";
 import { BOTS, playNight } from "./bots.js";
 import { World } from "./world.js";
+import { loadAssets } from "./assets.js";
 import { SKIN, SHIRT, HAIR, css } from "./characters.js";
+import { icon } from "./icons.js";
 
 /**
  * NIGHT MARKET — application: screens, input, camera, labels, saving.
@@ -22,15 +24,19 @@ const pad2 = (n) => String(n).padStart(2, "0");
 // ------------------------------------------------------------------ save data
 const SAVE_KEY = "night-market-save-v1";
 const save = (() => {
-    const base = { campaign: null, best: null, settings: { sfx: 0.8, music: 0.5, bloom: true, reducedMotion: null } };
+    const base = { campaign: null, best: null, settings: { sfx: 0.8, music: 0.5, bloom: true, shadows: true, reducedMotion: null } };
     try {
         const s = JSON.parse(localStorage.getItem(SAVE_KEY) || "{}");
         return { ...base, ...s, settings: { ...base.settings, ...(s.settings || {}) } };
     } catch (e) { return base; }
 })();
 if (save.campaign && save.campaign.v !== 1) save.campaign = null;
+if (save.campaign) sim.upgradeState(save.campaign);
+/** when the game was last open, for the night manager's earnings while away */
+let lastSeen = save.lastSeen || 0;
 function persist() {
     if (app.S) save.campaign = app.S;
+    save.lastSeen = Date.now();
     try { localStorage.setItem(SAVE_KEY, JSON.stringify(save)); } catch (e) { /* storage unavailable */ }
 }
 const systemPrefersReducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -41,13 +47,13 @@ const canvas = $("view");
 const game = new Game({ canvas, quality: "high", antialias: false });
 if (game.failed) throw new Error("WebGL unavailable");
 const { renderer, scene, camera, input } = game;
-renderer.postfx = new PostFX(renderer, { bloom: { threshold: 1.0, knee: 0.7, intensity: 0.95, radius: 1.3 }, exposure: 1.18, vignette: 0.42, grain: 0.03 });
-scene.clearColor.set([0.028, 0.024, 0.06, 1]);
+renderer.postfx = new PostFX(renderer, { bloom: { threshold: 1.05, knee: 0.6, intensity: 0.8, radius: 1.3 }, ao: { enabled: true, radius: 0.65, intensity: 0.9 }, exposure: 1.08, vignette: 0.34, grain: 0.02 });
 // a long lens: with a wide one, people near the edges of the screen appear to lean outwards
 camera.fov = 24;
 camera.far = 320;
 
-const world = new World(game);
+// the models are fetched before anything is shown; the page stays veiled until they are in
+const world = new World(game, await loadAssets());
 const audio = new Audio({ volume: 0.9, sfx: save.settings.sfx, music: save.settings.music });
 // ZzFX parameter arrays: volume, randomness, frequency, attack, sustain, release, shape, shapeCurve, slide,
 // deltaSlide, pitchJump, pitchJumpTime, repeatTime, noise, modulation, bitCrush, delay, sustainVolume, decay
@@ -88,7 +94,8 @@ function applySettings() {
     audio.setVolume("sfx", s.sfx);
     audio.setVolume("music", s.music);
     renderer.postfx.settings.bloom.enabled = s.bloom;
-    renderer.postfx.settings.grain = s.bloom ? 0.03 : 0;
+    renderer.postfx.settings.grain = s.bloom ? 0.02 : 0;
+    world.setShadows(s.shadows);
     game.juice.reducedMotion = rm;
     world.reducedMotion = rm;
 }
@@ -195,7 +202,7 @@ function feed(text, kind = "") {
 const avatar = (look, big = false) => `<span class="avatar${big ? " big" : ""}" style="--skin:${css(SKIN[look.skin])};--hair:${css(HAIR[look.hair])};--shirt:${css(SHIRT[look.shirt])}"></span>`;
 const pips = (n, max = VENDOR.maxSkill) => `<span class="pips" aria-label="Skill ${n} of ${max}">${"●".repeat(n)}<i>${"●".repeat(max - n)}</i></span>`;
 const traitLine = (v) => v.traits.map((t) => `${TRAITS[t].icon} ${TRAITS[t].name}`).join(" · ");
-const stallLabel = (stall) => `${STALLS[stall.type].icon} ${STALLS[stall.type].name}, spot ${stall.slot + 1}`;
+const stallLabel = (stall) => `${icon(stall.type, 15)} ${STALLS[stall.type].name}, spot ${stall.slot + 1}`;
 const starText = (n) => (n ? n.toFixed(1) + "★" : "–");
 
 // ------------------------------------------------------------------ labels over the 3D scene
@@ -216,12 +223,13 @@ function place(el, pos, lift = 0) {
     el.style.transform = `translate(${P.x.toFixed(1)}px,${(P.y - lift).toFixed(1)}px) translate(-50%,-100%)`;
     return true;
 }
+/** A label that rises from a character or stall and fades. `text` may be an icon (markup from icons.js). */
 function pop(key, text, cls, life = 1.5) {
     const a = world.anchors.get(key);
     if (!a || pops.length > 36) return;
     const el = document.createElement("div");
     el.className = "pop " + cls;
-    el.textContent = text;
+    if (text.startsWith("<svg")) el.innerHTML = text; else el.textContent = text;
     labelLayer.appendChild(el);
     pops.push({ el, key, pos: [a[0], a[1], a[2]], age: 0, life });
 }
@@ -268,7 +276,7 @@ function updateLabels(dt) {
         if (!el) { el = document.createElement("div"); el.className = "tag"; labelLayer.appendChild(el); stallTags.set(stall.id, el); el._html = ""; }
         if (refresh || !el._html) {
             const open = !!sim.worker(S, stall), cap = sim.queueCap(stall), q = stall.queue.length;
-            const html = `<span class="ico">${STALLS[stall.type].icon}</span>` + (open
+            const html = `<span class="ico">${icon(stall.type, 20)}</span>` + (open
                 ? `<b>$${stall.price}</b>${S.phase === "night" ? `<span class="q${q >= cap ? " full" : ""}">${q}/${cap}</span>` : ""}`
                 : `<b>No vendor</b>`);
             if (html !== el._html) { el._html = html; el.innerHTML = html; el.classList.toggle("shut", !open); }
@@ -304,13 +312,15 @@ function updateLabels(dt) {
     }
 
     // the name of whoever is selected
-    const a = app.sel && app.sel.type !== "stall" ? world.anchors.get((app.sel.type === "customer" ? "c" : "v") + app.sel.id) : null;
+    const a = app.sel && app.sel.type !== "stall" ? world.anchors.get(anchorKey(app.sel)) : null;
     nameTag.classList.toggle("hidden", !a || !inGame);
     if (a && inGame) place(nameTag, a, 26);
 }
 
 // ------------------------------------------------------------------ HUD
-let hudClock = 0, lastCash = null;
+let hudClock = 0, lastCash = null, shownCash = null;
+const anchorKey = (sel) => ({ stall: "s", vendor: "v", customer: "c", manager: "m" })[sel.type] + sel.id;
+function bump(el) { el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
 function updateHud(dt, force = false) {
     hudClock += dt;
     if (!force && hudClock < 0.1) return;
@@ -323,8 +333,11 @@ function updateHud(dt, force = false) {
     setText($("hudClock"), live ? `${pad2(c.hour)}:${pad2(c.minute)}` : S.phase === "prep" ? "Before opening" : "Closed");
     $("clockFill").style.width = (live ? c.frac * 100 : S.phase === "prep" ? 0 : 100) + "%";
     const cash = Math.round(S.cash);
-    setText($("hudCash"), money(cash));
-    if (lastCash !== null && cash > lastCash) { const el = $("hudCash").parentElement; el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
+    // the counter rolls toward the real figure rather than jumping to it
+    if (shownCash === null || reducedMotion() || Math.abs(cash - shownCash) < 1) shownCash = cash;
+    else shownCash += (cash - shownCash) * 0.35;
+    setText($("hudCash"), money(shownCash));
+    if (lastCash !== null && cash > lastCash && !coinsFlying) bump($("hudCash").parentElement);
     lastCash = cash;
     $("hudCash").parentElement.classList.toggle("low", cash < S.rent);
     setText($("hudRep"), String(Math.round(S.rep)));
@@ -372,11 +385,11 @@ function renderPanel() {
     let html = "";
     if (app.placing) {
         const moving = app.placing.kind === "move", own = moving ? sim.stallById(S, app.placing.stallId) : null;
-        const title = moving ? `Move the ${STALLS[own.type].name} stall to…` : `Where does the ${STALLS[app.placing.type].icon} ${STALLS[app.placing.type].name} stall go?`;
+        const title = moving ? `Move the ${STALLS[own.type].name} stall to…` : `Where does the ${icon(app.placing.type, 18)} ${STALLS[app.placing.type].name} stall go?`;
         html = `<div class="slotPick"><b>${title}</b><div class="slots">`;
         for (let i = 0; i < S.slots; i++) {
             const taken = sim.stallAt(S, i), off = moving ? taken === own : !!taken;
-            html += `<button data-slot="${i}" class="${taken ? "taken" : ""}" ${off ? "disabled" : ""} aria-label="Spot ${i + 1}${taken ? ", " + STALLS[taken.type].name : ", empty"}">${taken ? STALLS[taken.type].icon : i + 1}</button>`;
+            html += `<button data-slot="${i}" class="${taken ? "taken" : ""}" ${off ? "disabled" : ""} aria-label="Spot ${i + 1}${taken ? ", " + STALLS[taken.type].name : ", empty"}">${taken ? icon(taken.type, 22) : i + 1}</button>`;
         }
         html += `</div><div><button class="btn small ghost" data-act="cancelPlace">Cancel</button></div></div>`;
     } else if (app.tab === "stalls") {
@@ -385,7 +398,7 @@ function renderPanel() {
         for (const type of STALL_TYPES) {
             const d = STALLS[type], cant = S.cash < d.buy || full;
             html += `<button class="tile${cant ? " cant" : ""}" data-buy="${type}" aria-label="Buy ${d.name} stall for $${d.buy}. ${d.blurb}">
-                <span class="head"><span><span class="ico">${d.icon}</span> ${d.name}</span><span class="price">$${d.buy}</span></span>
+                <span class="head"><span><span class="ico">${icon(type, 26)}</span> ${d.name}</span><span class="price">${icon("coin", 14)}${d.buy}</span></span>
                 <p>${d.blurb}</p><span class="nums">$${d.price} a plate · ${d.serve.toFixed(1)}s · queue ${d.queue}</span></button>`;
         }
         html += `</div></div>`;
@@ -394,7 +407,7 @@ function renderPanel() {
             for (const stall of S.stalls.slice().sort((a, b) => a.slot - b.slot)) {
                 const v = sim.worker(S, stall), d = STALLS[stall.type], sel = app.sel?.type === "stall" && app.sel.id === stall.id;
                 html += `<button class="tile${sel ? " sel" : ""}" style="width:132px" data-stall="${stall.id}">
-                    <span class="head"><span><span class="ico">${d.icon}</span> Spot ${stall.slot + 1}</span></span>
+                    <span class="head"><span><span class="ico">${icon(stall.type, 26)}</span> Spot ${stall.slot + 1}</span></span>
                     <p>${d.name}${stall.level > 1 ? " · level " + stall.level : ""}</p><p>${v ? esc(v.name) : "<b style='color:var(--danger)'>No vendor</b>"}</p>
                     <span class="nums">$${stall.price} a plate</span></button>`;
             }
@@ -411,6 +424,16 @@ function renderPanel() {
         };
         html += `<div class="group"><small>YOUR TEAM</small><div class="rowed">${team.length ? team.map((v) => person(v, true)).join("") : `<div class="info">Nobody yet. Hire someone from the right.</div>`}</div></div>`;
         html += `<div class="sep"></div><div class="group"><small>LOOKING FOR WORK TONIGHT</small><div class="rowed">${S.market.length ? S.market.map((id) => person(sim.vendorById(S, id), false)).join("") : `<div class="info">Nobody is looking for work tonight.</div>`}</div></div>`;
+    } else if (app.tab === "managers") {
+        html += `<div class="group"><small>MANAGERS · HIRED ONCE, KEPT FOR GOOD</small><div class="rowed">`;
+        for (const id of MANAGER_IDS) {
+            const def = MANAGERS[id], level = S.managers[id], cost = sim.managerCost(S, id), next = def.levels[level], cant = !next || S.cash < cost;
+            html += `<button class="tile manager${cant ? " cant" : ""}${level ? " has" : ""}" data-manager="${id}" ${next ? "" : "disabled"} aria-label="${def.name}, ${level ? "level " + level : "not hired"}. ${next ? (level ? "Promote" : "Hire") + " for $" + cost : "Top level"}">
+                <span class="head"><span>${avatar(def.look)} ${def.name}</span></span>
+                <p>${esc(def.text(next || def.levels[level - 1]))}</p>
+                <span class="nums">${pips(level, 3)} ${next ? `${level ? "promote" : "hire " + esc(def.person)} · ${icon("coin", 13)}${cost}` : esc(def.person) + " · top level"}</span></button>`;
+        }
+        html += `</div></div>`;
     } else {
         const cost = sim.extendCost(S), canExtend = S.slots < STREET.maxSlots;
         const known = [];
@@ -466,7 +489,11 @@ function chooseSlot(slot) {
     if (p.kind === "buy") {
         const r = sim.buyStall(S, p.type, slot);
         setPlacing(null);
-        if (act(r)) { select({ type: "stall", id: r.stall.id }); if (!sim.worker(S, r.stall)) { app.tab = "staff"; renderPanel(); } }
+        if (act(r)) {
+            world.celebrate(sim.slotX(slot), 3, STALLS[p.type].color.map((c) => c * 2.6).concat(1));
+            select({ type: "stall", id: r.stall.id });
+            if (!sim.worker(S, r.stall)) { app.tab = "staff"; renderPanel(); }
+        }
     } else {
         const r = sim.moveStall(S, p.stallId, slot);
         setPlacing(null);
@@ -490,6 +517,10 @@ $("dock").addEventListener("click", (e) => {
     else if (b.dataset.slot) chooseSlot(Number(b.dataset.slot));
     else if (b.dataset.stall) { sfx("ui"); select({ type: "stall", id: Number(b.dataset.stall) }); }
     else if (b.dataset.vendor) { sfx("ui"); select({ type: "vendor", id: Number(b.dataset.vendor) }); }
+    else if (b.dataset.manager) {
+        const id = b.dataset.manager, was = S.managers[id];
+        if (act(sim.hireManager(S, id), "hire", was ? `${MANAGERS[id].person} promoted` : `${MANAGERS[id].person} joins as ${MANAGERS[id].name.toLowerCase()}`)) world.celebrate(sim.slotX(S.slots - 1) + 2, 0.5);
+    }
     else if (b.dataset.act === "cancelPlace") { sfx("ui"); setPlacing(null); }
     else if (b.dataset.act === "extend") { if (act(sim.extendStreet(S), "place", "Two more spots opened up")) homeView(S); }
 });
@@ -499,7 +530,7 @@ $("dock").addEventListener("click", (e) => {
 let cardLive = [];
 function select(sel) {
     app.sel = sel;
-    world.select(sel ? (sel.type === "stall" ? "s" : sel.type === "vendor" ? "v" : "c") + sel.id : null);
+    world.select(sel ? anchorKey(sel) : null);
     renderCard();
     if (app.mode === "prep") renderPanel();
 }
@@ -530,7 +561,7 @@ function renderCard() {
         const stall = sim.stallById(S, sel.id);
         if (!stall) return select(null);
         const d = STALLS[stall.type], v = stall.vendorId != null ? sim.vendorById(S, stall.vendorId) : null, range = sim.priceRange(stall.type);
-        html += `<div class="cardHead"><span class="bigIco">${d.icon}</span><div><h3>${d.name}</h3><p class="sub">Spot ${stall.slot + 1} · Level ${stall.level}, ${LEVELS[stall.level].label.toLowerCase()}</p></div>${closeBtn}</div>`;
+        html += `<div class="cardHead"><span class="bigIco">${icon(stall.type, 44)}</span><div><h3>${d.name}</h3><p class="sub">Spot ${stall.slot + 1} · Level ${stall.level}, ${LEVELS[stall.level].label.toLowerCase()}</p></div>${closeBtn}</div>`;
         if (prep) {
             html += `<label class="fieldLabel" for="pickVendor">WORKED BY</label><select id="pickVendor" class="pick" data-act="staff"><option value="">Nobody</option>`;
             for (const o of sim.hiredVendors(S)) {
@@ -585,6 +616,13 @@ function renderCard() {
             const lines = sim.explainVendor(S, v).map((l) => `<div class="line ${l.tone}"><span class="i">${l.icon}</span><b>${esc(l.title)}</b><span>${esc(l.text)}</span></div>`).join("");
             const el = $("cLines"); if (el && el._h !== lines) { el._h = lines; el.innerHTML = lines; }
         });
+    } else if (sel.type === "manager") {
+        const id = MANAGER_IDS[sel.id], def = MANAGERS[id], level = S.managers[id];
+        if (!level) return select(null);
+        nameTag.textContent = def.person;
+        html += `<div class="cardHead">${avatar(def.look, true)}<div><h3>${esc(def.person)}</h3><p class="sub">${def.name} · ${pips(level, 3)} level ${level}</p></div>${closeBtn}</div>
+            <div class="lines"><div class="line good"><span class="i">${def.icon}</span><b>${def.name}</b><span>${esc(def.text(def.levels[level - 1]))}</span></div></div>
+            <p class="blurb">${def.levels[level] ? `Promote from the Managers tab for ${def.levels[level].cost}: ${esc(def.text(def.levels[level]))}` : "As good as this job gets."}</p>`;
     } else {
         const c = sim.customerById(S, sel.id);
         if (!c) return select(null);
@@ -592,7 +630,7 @@ function renderCard() {
         nameTag.textContent = c.name;
         html += `<div class="cardHead">${avatar(c.look, true)}<div><h3>${esc(c.name)}</h3><p class="sub">${reg ? reg.title : "Customer"}</p></div>${closeBtn}</div>
             <div class="bars"><span>Patience</span><div class="bar" id="cPatience"><i></i></div><em id="cPatienceN"></em></div>
-            <div class="kv"><span>Craving</span><b>${STALLS[c.craving].icon} ${STALLS[c.craving].name}${c.thirsty ? " · thirsty 🧋" : ""}</b></div>
+            <div class="kv"><span>Craving</span><b>${icon(c.craving, 16)} ${STALLS[c.craving].name}${c.thirsty ? " · thirsty " + icon("tea", 16) : ""}</b></div>
             <div class="kv"><span>Money left</span><b id="cBudget"></b></div>
             <div class="kv"><span>Right now</span><b id="cDoing" style="font-family:var(--display);font-size:13.5px"></b></div>
             ${reg ? `<p class="blurb">${reg.blurb}</p>` : ""}`;
@@ -619,7 +657,7 @@ $("card").addEventListener("click", (e) => {
     const a = b.dataset.act;
     if (a === "close") { sfx("ui"); select(null); }
     else if (a === "price") { const stall = sim.stallById(S, sel.id); sim.setPrice(S, stall.id, stall.price + Number(b.dataset.d)); sfx("ui"); for (const fn of cardLive) fn(); if (app.mode === "prep") renderPanel(); persist(); }
-    else if (a === "upgrade") act(sim.upgradeStall(S, sel.id), "hire", "Upgraded");
+    else if (a === "upgrade") { const stall = sim.stallById(S, sel.id); if (act(sim.upgradeStall(S, sel.id), "hire", "Upgraded")) world.celebrate(sim.slotX(stall.slot), 3); }
     else if (a === "move") { sfx("ui"); app.tab = "stalls"; setPlacing({ kind: "move", stallId: sel.id }); }
     else if (a === "sell") {
         if (b.dataset.armed !== "1") { b.dataset.armed = "1"; b.textContent = "Really sell?"; setTimeout(() => { b.dataset.armed = ""; b.textContent = "Sell"; }, 2500); return; }
@@ -698,9 +736,9 @@ function goTitle() {
     (live ? $("continueBtn") : $("newBtn")).focus({ preventScroll: true });
 }
 
-function startCampaign(state) {
-    app.S = state;
-    lastCash = null;
+function startCampaign(state, fromSave = false) {
+    app.S = sim.upgradeState(state);
+    lastCash = null; shownCash = null;
     clearLabels();
     world.reset();
     homeView(app.S);
@@ -708,7 +746,27 @@ function startCampaign(state) {
     if (S.phase === "night") enterNight(true);
     else if (S.phase === "closing") { toPrepScreens(); showClosing(); }
     else if (S.phase === "over") { toPrepScreens(); showOver(); }
-    else toPrep();
+    else { toPrep(); if (fromSave) welcomeBack(); }
+}
+
+/** The night manager kept the street open while the game was closed: show what it earned. */
+function welcomeBack() {
+    const S = app.S, away = lastSeen ? (Date.now() - lastSeen) / 1000 : 0;
+    lastSeen = 0;      // once per visit
+    const r = sim.offlineEarnings(S, away);
+    if (away < 60 || r.cash <= 0) return;
+    const h = Math.floor(r.hours), m = Math.round((r.hours - h) * 60);
+    $("offlineText").textContent = `${MANAGERS.night.person} kept the street open for ${h ? h + " h " : ""}${m} min while you were away${r.capped ? " (as long as a night manager at this level can cover)" : ""}.`;
+    $("offlineCash").textContent = "+" + money(r.cash);
+    $("offlineBtn").onclick = () => {
+        sim.collectOffline(S, away);
+        show("offline", false);
+        sfx("tip");
+        flyCoins($("offlineCash").getBoundingClientRect(), 14);
+        updateHud(0, true); persist();
+    };
+    show("offline", true);
+    $("offlineBtn").focus({ preventScroll: true });
 }
 
 function toPrepScreens() {
@@ -728,7 +786,7 @@ function toPrep() {
     toPrepScreens();
     $("feed").innerHTML = "";
     if (app.sel && app.sel.type === "customer") app.sel = null;
-    world.select(app.sel ? (app.sel.type === "stall" ? "s" : "v") + app.sel.id : null);
+    world.select(app.sel ? anchorKey(app.sel) : null);
     if (!S.stalls.length) app.tab = "stalls";
     renderPanel(); renderCard();
     persist();
@@ -771,6 +829,41 @@ function enterNight(resumed) {
     updateHud(0, true);
 }
 
+// ------------------------------------------------------------------ juice
+let coinsFlying = 0;
+/**
+ * Coins arc from a point on screen to the cash counter, which bumps as each one lands.
+ * @param {{ left: number, top: number, width: number, height: number }} from a rectangle in CSS pixels
+ */
+function flyCoins(from, count = 1) {
+    if (reducedMotion() || document.hidden) return;
+    const target = $("hudCash").parentElement.getBoundingClientRect();
+    const x0 = from.left + from.width / 2, y0 = from.top + from.height / 2, x1 = target.left + 22, y1 = target.top + target.height / 2;
+    for (let i = 0; i < count && coinsFlying < 26; i++) {
+        const el = document.createElement("div");
+        el.className = "coinFly";
+        el.innerHTML = icon("coin", 22);
+        document.body.appendChild(el);
+        coinsFlying++;
+        // a little scatter at the start, then up and over to the counter
+        const sx = x0 + (Math.random() - 0.5) * 36, sy = y0 + (Math.random() - 0.5) * 20, lift = 50 + Math.random() * 50;
+        const anim = el.animate([
+            { transform: `translate(${sx}px, ${sy}px) scale(0.4)`, opacity: 0 },
+            { transform: `translate(${sx}px, ${sy - 14}px) scale(1.15)`, opacity: 1, offset: 0.15 },
+            { transform: `translate(${(sx + x1) / 2}px, ${Math.min(sy, y1) - lift}px) scale(1)`, opacity: 1, offset: 0.6 },
+            { transform: `translate(${x1}px, ${y1}px) scale(0.55)`, opacity: 0.9 },
+        ], { duration: 620 + Math.random() * 180, delay: i * 70, easing: "cubic-bezier(0.3, 0, 0.5, 1)", fill: "both" });
+        anim.onfinish = anim.oncancel = () => { el.remove(); coinsFlying--; bump($("hudCash").parentElement); };
+    }
+}
+/** Screen rectangle of a stall's tag (where its coins come from), or null if it is off screen. */
+function tagRect(stallId) {
+    const el = stallTags.get(stallId);
+    if (!el || el.style.visibility === "hidden") return null;
+    el.classList.remove("sold"); void el.offsetWidth; el.classList.add("sold");
+    return el.getBoundingClientRect();
+}
+
 function setSpeed(n) {
     app.speed = n;
     if (n > 0) app.lastSpeed = n;
@@ -784,6 +877,8 @@ function react(S, events) {
         if (e.type === "served") {
             const stall = sim.stallById(S, e.stallId), x = stall ? sim.slotX(stall.slot) : 0;
             pop("s" + e.stallId, e.price ? "+$" + e.price : "free", "money");
+            const from = tagRect(e.stallId);
+            if (from && e.price) flyCoins(from, app.speed > 2 ? 1 : e.price >= 10 ? 3 : 2);
             sfx("coin", { pan: panOf(x), pitch: 0.9 + Math.random() * 0.25, volume: 0.6 });
             if (e.tip) { pop("c" + e.id, "tip +$" + e.tip, "good", 1.8); sfx("tip", { pan: panOf(x) }); }
             if (e.mistake) pop("v" + e.vendorId, "🔥", "emoji", 1.6);
@@ -801,7 +896,7 @@ function react(S, events) {
         } else if (e.type === "arrive") {
             const c = sim.customerById(S, e.id);
             if (!c) continue;
-            pop("c" + e.id, STALLS[c.craving].icon, "emoji", 2.2);
+            pop("c" + e.id, icon(c.craving, 22), "emoji", 2.2);
             if (c.kind === "landlord") feed("Mr. Okafor, your landlord, has arrived. Serve him quickly.", "bad");
             else if (c.kind === "kid") feed("Pip and Biscuit are on the street. Stalls near them get busier.", "good");
             else if (c.kind === "nurse") feed("Imani is on her break. She tips if her vendor still has energy.");
@@ -847,6 +942,16 @@ function showClosing() {
     $("ledger").innerHTML = row("Takings", money(m.revenue)) + (m.tips ? row("Tips", money(m.tips)) : "") + row("Ingredients", money(-m.ingredients), "neg")
         + row("Wages", money(-m.wages), "neg") + row("Stall upkeep", money(-m.upkeep), "neg") + row("Rent", money(-m.rent), "neg")
         + row("Tonight", (m.net >= 0 ? "+" : "") + money(m.net), "total " + (m.net >= 0 ? "up" : "down")) + row("Cash in hand", money(m.cash), m.cash < 0 ? "neg" : "");
+    // the night's total rolls up from zero once the rows above it have appeared
+    const totalEl = $("ledger").querySelector(".total b");
+    if (totalEl && !reducedMotion()) {
+        const t0 = performance.now() + 650, roll = () => {
+            const u = Math.min(1, Math.max(0, (performance.now() - t0) / 700)), v = m.net * (1 - Math.pow(1 - u, 3));
+            totalEl.textContent = (m.net >= 0 ? "+" : "") + money(v);
+            if (u < 1 && app.mode === "closing") setTimeout(roll, 30);
+        };
+        roll();
+    }
     const dRep = m.repAfter - m.repBefore;
     $("repRow").innerHTML = `<span class="chip">Reviews <b>${starText(m.avgStars)}</b></span>
         <span class="chip ${dRep >= 0 ? "up" : "down"}">Reputation <b>${Math.round(m.repAfter)} (${signed(dRep)})</b></span>
@@ -942,7 +1047,7 @@ let settingsReturn = null;
 function openSettings() {
     settingsReturn = document.activeElement;
     $("setSfx").value = save.settings.sfx; $("setMusic").value = save.settings.music;
-    $("setBloom").checked = save.settings.bloom; $("setMotion").checked = reducedMotion();
+    $("setBloom").checked = save.settings.bloom; $("setShadows").checked = save.settings.shadows; $("setMotion").checked = reducedMotion();
     show("settings", true);
     $("settings").querySelector("[data-close]").focus();
 }
@@ -951,7 +1056,7 @@ function closeSettings() { show("settings", false); settingsReturn?.focus?.(); }
 // ------------------------------------------------------------------ buttons
 const click = (id, fn) => $(id).addEventListener("click", () => { sfx("ui"); fn(); });
 const newCampaign = () => fade(() => { app.snapshot = null; startCampaign(sim.createCampaign(1 + Math.floor(Math.random() * 2147483000))); });
-click("continueBtn", () => fade(() => startCampaign(JSON.parse(JSON.stringify(save.campaign)))));
+click("continueBtn", () => { if (save.campaign) fade(() => startCampaign(JSON.parse(JSON.stringify(save.campaign)), true)); });
 $("newBtn").addEventListener("click", (e) => {
     const b = e.currentTarget, live = save.campaign && save.campaign.phase !== "over";
     sfx("ui");
@@ -974,6 +1079,7 @@ document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("cli
 $("setSfx").addEventListener("input", (e) => { save.settings.sfx = +e.target.value; applySettings(); persist(); sfx("ui"); });
 $("setMusic").addEventListener("input", (e) => { save.settings.music = +e.target.value; applySettings(); persist(); });
 $("setBloom").addEventListener("change", (e) => { save.settings.bloom = e.target.checked; applySettings(); persist(); });
+$("setShadows").addEventListener("change", (e) => { save.settings.shadows = e.target.checked; applySettings(); persist(); });
 $("setMotion").addEventListener("change", (e) => { save.settings.reducedMotion = e.target.checked; applySettings(); persist(); });
 $("resetProgress").addEventListener("click", (e) => {
     const b = e.currentTarget;
@@ -1032,10 +1138,32 @@ game.onUpdate((dt) => {
     }
 });
 
+// ------------------------------------------------------------------ keeping the frame rate up
+/**
+ * If frames stay slow for a few seconds, give up the most expensive effects one at a time, cheapest
+ * loss first. Nothing is written to the saved settings: a slow moment shouldn't change them for good.
+ */
+const quality = { slow: 0, step: 0, steps: [
+    () => { renderer.postfx.settings.ao.enabled = false; },
+    () => { renderer.resolutionScale = 0.8; renderer.resize(); },
+    () => { scene.shadow.enabled = false; },
+    () => { renderer.resolutionScale = 0.65; renderer.resize(); },
+] };
+function watchFrameRate(frameDelta) {
+    if (document.hidden || app.menu || quality.step >= quality.steps.length) return;
+    // count time spent above 28 ms a frame (under ~35 fps); a single hitch decays away
+    quality.slow = frameDelta > 0.028 ? quality.slow + frameDelta : Math.max(0, quality.slow - frameDelta * 0.5);
+    if (quality.slow < 3) return;
+    quality.slow = 0;
+    quality.steps[quality.step++]();
+    if (quality.step === 1) toast("Graphics lowered a little to keep things smooth");
+}
+
 // ------------------------------------------------------------------ per rendered frame
 game.onRender((frameDelta) => {
     const S = cur();
     if (!S) return;
+    watchFrameRate(frameDelta);
     updateCamera(frameDelta);
     const running = !app.menu && (app.mode === "title" || (app.mode === "night" && app.speed > 0));
     world.frame(S, game.loop.realTime, frameDelta, running);
@@ -1044,9 +1172,11 @@ game.onRender((frameDelta) => {
 });
 
 // ------------------------------------------------------------------ boot
+document.querySelectorAll("[data-icon]").forEach((el) => { el.innerHTML = icon(el.dataset.icon, Number(el.dataset.size) || 18); });
 applySettings();
 goTitle();
 game.start();
+$("fade").classList.remove("on");
 
 // testing / console hook
 window.market = { app, game, world, sim, save, view, goal, BOTS, playNight, startCampaign, openNight, setSpeed, select, goTitle };

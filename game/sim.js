@@ -1,4 +1,4 @@
-import { NIGHT, STREET, ECON, STALLS, MEAL_TYPES, LEVELS, TRAITS, TRAIT_IDS, VENDOR, CUSTOMER, VENDOR_NAMES, CUSTOMER_NAMES, REGULARS } from "./data.js";
+import { NIGHT, STREET, ECON, STALLS, MEAL_TYPES, LEVELS, TRAITS, TRAIT_IDS, VENDOR, CUSTOMER, VENDOR_NAMES, CUSTOMER_NAMES, REGULARS, MANAGERS } from "./data.js";
 import { pickEvent } from "./events.js";
 
 /**
@@ -102,6 +102,7 @@ export function createCampaign(seed = 1) {
         cash: ECON.startCash, rep: ECON.startRep, rent: ECON.rentBase, rentStep: ECON.rentStep, rentFreeze: 0,
         slots: STREET.startSlots, stalls: [], vendors: [], market: [], rel: {}, nextId: 1,
         mods: [], appealBonus: 0, rivalStall: false, policy: { student: null },
+        managers: { night: 0, marshal: 0, buyer: 0, promoter: 0 },
         flags: { studentFed: 0, nurseServed: 0 }, eventNight: {},
         t: 0, customers: [], arrivals: [], arrivalIdx: 0, sceneT: 0, kidAt: null, events: [],
         stats: null, summary: null, event: null, history: [],
@@ -141,6 +142,49 @@ function refreshMarket(s) {
     }
 }
 
+// ------------------------------------------------------------------ managers and offline earnings
+/** The current level's effect for a manager, or null if not hired. */
+export const managerLevel = (s, id) => (s.managers[id] ? MANAGERS[id].levels[s.managers[id] - 1] : null);
+/** Multiplier a manager applies (1 if not hired). */
+const managed = (s, id) => { const l = managerLevel(s, id); return l ? l.value : 1; };
+/** Cost of hiring or promoting a manager, or Infinity at the top level. */
+export const managerCost = (s, id) => { const l = MANAGERS[id].levels[s.managers[id]]; return l ? l.cost : Infinity; };
+
+export function hireManager(s, id) {
+    if (s.phase !== "prep") return fail("The market is open");
+    if (!MANAGERS[id]) return fail("No such manager");
+    const cost = managerCost(s, id);
+    if (!isFinite(cost)) return fail("Already at the top level");
+    if (s.cash < cost) return fail(`You need $${cost}`);
+    s.cash -= cost; s.managers[id]++;
+    return ok;
+}
+
+/**
+ * What the street earned while the game was closed. Needs a night manager, and only counts between
+ * nights. `seconds` is real time away; the caller supplies it, so this stays pure.
+ * @returns {{ cash: number, hours: number, capped: boolean }}
+ */
+export function offlineEarnings(s, seconds) {
+    const l = managerLevel(s, "night");
+    if (!l || s.phase !== "prep" || !(seconds > 0)) return { cash: 0, hours: 0, capped: false };
+    const recent = s.history.slice(-3).map((h) => Math.max(0, h.net));
+    const average = recent.length ? recent.reduce((a, b) => a + b, 0) / recent.length : 0;
+    const hours = Math.min(seconds / 3600, l.hours);
+    return { cash: Math.floor(average * l.rate * hours), hours, capped: seconds / 3600 >= l.hours };
+}
+export function collectOffline(s, seconds) {
+    const r = offlineEarnings(s, seconds);
+    s.cash += r.cash;
+    return r;
+}
+
+/** Bring a campaign saved by an older version up to date. */
+export function upgradeState(s) {
+    s.managers = { night: 0, marshal: 0, buyer: 0, promoter: 0, ...(s.managers || {}) };
+    return s;
+}
+
 // ------------------------------------------------------------------ derived numbers (also shown in the UI)
 export const queueCap = (stall) => STALLS[stall.type].queue + LEVELS[stall.level].queue;
 export const upgradeCost = (stall) => (stall.level >= 3 ? Infinity : Math.round(STALLS[stall.type].buy * LEVELS[stall.level + 1].cost));
@@ -153,7 +197,7 @@ export const priceRange = (type) => ({ min: Math.max(1, Math.ceil(STALLS[type].p
 /** Customers expected tonight. */
 export function arrivalsFor(s) {
     const a = ECON.arrivals;
-    return Math.round((a.base + s.rep * a.perRep + Math.min(s.night, 14) * a.perNight) * mod(s, "arrivals") * (s.rivalStall ? 0.86 : 1));
+    return Math.round((a.base + s.rep * a.perRep + Math.min(s.night, 14) * a.perNight) * mod(s, "arrivals") * managed(s, "promoter") * (s.rivalStall ? 0.86 : 1));
 }
 /** Hour and minute on the market clock for the current tick. */
 export function nightClock(s) {
@@ -528,7 +572,7 @@ function completeServe(s, stall, c, v) {
     const st = s.stats, def = STALLS[stall.type], price = priceFor(s, c, stall);
     c.budget -= price; c.spent += price;
     s.cash += price; st.revenue += price;
-    const cost = def.cost * (has(v, "penny") ? TRAITS.penny.cost : 1) * mod(s, "cost");
+    const cost = def.cost * (has(v, "penny") ? TRAITS.penny.cost : 1) * mod(s, "cost") * managed(s, "buyer");
     s.cash -= cost; st.ingredients += cost;
 
     // satisfaction 0..1 → 1..5 stars
@@ -591,7 +635,7 @@ function move(c, tx, ty, step) {
 const SPOT = { x: 0, y: 0 };
 
 function stepCustomers(s, dt) {
-    const patienceRate = mod(s, "patience");
+    const patienceRate = mod(s, "patience") * managed(s, "marshal");
     for (let i = s.customers.length - 1; i >= 0; i--) {
         const c = s.customers[i];
         const stall = c.stallId != null ? stallById(s, c.stallId) : null;

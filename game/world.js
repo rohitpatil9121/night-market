@@ -1,41 +1,87 @@
-import { Entity, Mesh, BasicMaterial, ParticleSystem, primitives, mat4 } from "../engine/index.js";
-import { STREET, STALLS } from "./data.js";
+import { Entity, Mesh, InstancedMesh, Geometry, BasicMaterial, StandardMaterial, ShadowMap, ParticleSystem, primitives, mat4, quat } from "../engine/index.js";
+import { STREET, STALLS, NIGHT, MANAGERS, MANAGER_IDS } from "./data.js";
 import { slotX, streetEnds, stallAt, worker, vendorById, hiredVendors, neighbours, relation, has } from "./sim.js";
-import { createLighting, BoxBatch, frameAt, IDENTITY, MAX_LIGHTS } from "./gfx.js";
-import { drawCharacter, drawDog } from "./characters.js";
+import { createGroundMaterial, createSky, signTexture } from "./gfx.js";
+import { Character, makeDog } from "./characters.js";
 
 /**
  * NIGHT MARKET — the 3D scene. Pure presentation: it reads the simulation state and draws it, and never
- * changes it. Two instanced box batches do nearly all the work:
- *   statics  street furniture, stalls, buildings. Rebuilt by rebuild() when the layout changes.
- *   chars    every vendor and customer. Rewritten each rendered frame by frame().
- * so a full street is a handful of draw calls however many people are on it.
+ * changes it.
+ *
+ *   street    every stall, table, gate and building is a loaded model; they are merged into ONE mesh by
+ *             rebuild(), so the whole street is one draw call (and one more in the shadow pass)
+ *   people    one skinned mesh each, created the first time someone appears and removed when they leave
+ *   light     an evening sun that casts shadows and fades to moonlight as the night goes on, plus a point
+ *             light per open stall; ambient occlusion and bloom come from the engine's PostFX
  * @module game/world
  */
 
 const TAU = Math.PI * 2;
 /** cheap repeatable noise for decoration (never for gameplay) */
 const noise = (i) => { const v = Math.sin(i * 127.1 + 311.7) * 43758.5453; return v - Math.floor(v); };
-const WOOD = [0.36, 0.25, 0.17], TOP = [0.62, 0.5, 0.37], METAL = [0.2, 0.2, 0.25], DARK = [0.13, 0.13, 0.17];
-const WARM = [2.3, 1.75, 0.95];
-const F = mat4.create();
+const lerp = (a, b, t) => a + (b - a) * t;
+/** overshoots a little past 1 before settling: things pop into place */
+const easeOutBack = (t) => 1 + 2.70158 * Math.pow(t - 1, 3) + 1.70158 * Math.pow(t - 1, 2);
 const PROPS = { critic: "notebook", student: "backpack", landlord: "tophat", rival: "shades", nurse: "cap" };
+const ACCENTS = { student: [0.98, 0.56, 0.2], landlord: [0.85, 0.68, 0.25], nurse: [0.9, 0.18, 0.22] };
+const UNIT_BOX = primitives.box(1, 1, 1);
+
+/** Lighting at sunset [0] and at night [1]; everything in between is a blend. */
+const LIGHT = {
+    sun: [[1.42, 1.02, 0.7], [0.22, 0.27, 0.45]],
+    sky: [[0.34, 0.36, 0.52], [0.13, 0.14, 0.27]],
+    ground: [[0.24, 0.19, 0.18], [0.05, 0.045, 0.08]],
+    fog: [[0.66, 0.5, 0.46], [0.03, 0.026, 0.065]],
+    fogDensity: [0.002, 0.006],
+    lamps: [0.4, 1.2],
+    shadow: [0.78, 0.5],
+};
+
+const M = mat4.create(), Q = quat.create(), T3 = new Float32Array(3), S3 = new Float32Array(3);
 
 export class World {
-    /** @param {import("../engine/index.js").Game} game */
-    constructor(game) {
+    /**
+     * @param {import("../engine/index.js").Game} game
+     * @param {Awaited<ReturnType<import("./assets.js").loadAssets>>} assets
+     */
+    constructor(game, assets) {
         this.game = game;
+        this.assets = assets;
         this.reducedMotion = false;
-        this.light = createLighting();
-        game.scene.sky = this.light.sky;
-        this.root = game.scene.add(new Entity({ name: "world" }));
+        const scene = game.scene;
+        this.sky = createSky();
+        scene.sky = this.sky;
+        scene.sunDirection.set(normalize([-0.42, -0.52, 0.74]));
+        scene.shadow = new ShadowMap({ size: 2048, depth: 90, strength: 0.7, normalBias: 0.06 });
+        this.root = scene.add(new Entity({ name: "world" }));
 
-        this.ground = this.root.add(new Entity({ name: "ground", mesh: new Mesh(primitives.plane(260, 110), this.light.groundMaterial) }));
+        this.groundMaterial = createGroundMaterial();
+        this.ground = this.root.add(new Entity({ name: "ground", mesh: new Mesh(primitives.plane(260, 110), this.groundMaterial) }));
         this.ground.setPosition(14, -4, 0);
-        this.statics = new BoxBatch(this.light.boxMaterial, 5200, "statics");
-        this.chars = new BoxBatch(this.light.boxMaterial, 2600, "chars");
-        this.root.add(this.statics.entity);
-        this.root.add(this.chars.entity);
+
+        // the street: one merged mesh, replaced by rebuild()
+        this.streetMaterial = new StandardMaterial({ vertexColors: true });
+        this.street = this.root.add(new Entity({ name: "street" }));
+        this.signs = this.root.add(new Entity({ name: "signs" }));
+        this.signPlane = primitives.plane(1.96, 0.62);
+        this.signMaterials = new Map();
+
+        this.people = this.root.add(new Entity({ name: "people" }));
+        /** key ("c12", "v3") → { character, kind, yaw, cheer, … } */
+        this.cast = new Map();
+        this.dog = null;
+        this._stamp = 0;
+
+        // what people carry away: one instanced mesh per kind of food
+        this.food = {};
+        const foodMaterial = new StandardMaterial({ vertexColors: true });
+        for (const type of ["skewers", "dumplings", "noodles", "tea"]) {
+            const mesh = new InstancedMesh(assets.props.geometry("food_" + type), foodMaterial, 96);
+            mesh.count = 0;
+            const e = this.root.add(new Entity({ name: "food-" + type, mesh }));
+            e.interpolate = false;
+            this.food[type] = mesh;
+        }
 
         // slot markers: one glowing tile per possible slot, shown while placing or moving a stall
         const tile = primitives.plane(2.6, 2.5);
@@ -43,197 +89,196 @@ export class World {
         for (let i = 0; i < STREET.maxSlots; i++) {
             const e = this.root.add(new Entity({ name: "slot" + i, visible: false,
                 mesh: new Mesh(tile, new BasicMaterial({ lit: false, color: [0.3, 1.2, 0.7], opacity: 0.35, blending: "additive", depthWrite: false, cull: "none" })) }));
-            e.setPosition(slotX(i), STREET.stallY + 0.05, 0.06);
+            e.setPosition(slotX(i), STREET.stallY + 0.05, 0.08);
             this.slotTiles.push(e);
         }
         this.slotMode = null;
 
-        // selection ring
         this.ring = this.root.add(new Entity({ name: "ring", visible: false,
             mesh: new Mesh(primitives.torus(1, 0.05, 6, 40), new BasicMaterial({ lit: false, color: [1.6, 2.4, 2.6] })) }));
         this.selected = null;
 
         this.steam = this.root.add(new ParticleSystem({ name: "steam", capacity: 900, gravity: [0, 0, 0.9], drag: 0.7, blending: "normal" }));
         this.sparks = this.root.add(new ParticleSystem({ name: "sparks", capacity: 1600, gravity: [0, 0, -7], drag: 0.5 }));
-        for (const e of [this.ground, this.ring, ...this.slotTiles]) e.interpolate = false;
+        for (const e of [this.ground, this.ring, this.street, ...this.slotTiles]) e.interpolate = false;
 
-        /** render-side memory per character: smoothed facing, walk phase, short-lived reactions */
-        this.memo = new Map();
-        /** where things are on screen-relevant anchors: key ("c12", "v3", "s7") → [x, y, z] */
+        /** where things are, for labels and picking: key ("c12", "v3", "s7") → [x, y, z] */
         this.anchors = new Map();
-        this.lights = [];
+        /** the scene's point lights with their base colours, so they can breathe and flicker */
+        this.lamps = [];
+        this.dusk = 0;
+        this._dt = 0;
         this.steamClock = 0;
         this.state = null;
+        this.setDusk(0);
+    }
+
+    // ------------------------------------------------------------------ light
+    /** 0 = sunset (before opening), 1 = deep night (closing time). */
+    setDusk(d) {
+        this.dusk = d;
+        const scene = this.game.scene, mix3 = (out, pair) => { for (let i = 0; i < 3; i++) out[i] = lerp(pair[0][i], pair[1][i], d); };
+        mix3(scene.sunColor, LIGHT.sun); mix3(scene.skyColor, LIGHT.sky); mix3(scene.groundColor, LIGHT.ground); mix3(scene.fogColor, LIGHT.fog);
+        scene.clearColor.set([scene.fogColor[0], scene.fogColor[1], scene.fogColor[2], 1]);
+        scene.shadow.strength = lerp(LIGHT.shadow[0], LIGHT.shadow[1], d);
+        scene.fogDensity = lerp(LIGHT.fogDensity[0], LIGHT.fogDensity[1], d);
+        this.sky.uniforms.u_dusk = d;
+        this.sky.uniforms.u_haze.set(scene.fogColor);
+    }
+
+    /** Sun shadows and ambient occlusion on or off (the settings screen). */
+    setShadows(on) {
+        this.game.scene.shadow.enabled = on;
+        if (this.game.renderer.postfx) this.game.renderer.postfx.settings.ao.enabled = on;
     }
 
     // ------------------------------------------------------------------ static scene
     /** Rebuild the street for this state. Call after anything that changes the layout. */
     rebuild(s) {
         this.state = s;
-        const B = this.statics, L = [];
+        const A = this.assets, P = A.props, parts = [], lights = [];
+        const ends = streetEnds(s), gateL = -2.5, gateR = slotX(s.slots - 1) + 2.5, span = gateR - gateL;
+        this.groundMaterial.values.u_street[0] = ends.left - 30;
+        this.groundMaterial.values.u_street[1] = ends.right + 30;
         // forget stalls that were sold and vendors who have left
         for (const k of [...this.anchors.keys()]) if (k[0] === "s" || (k[0] === "v" && !vendorById(s, Number(k.slice(1)))?.hired)) this.anchors.delete(k);
-        const ends = streetEnds(s), gateL = -2.5, gateR = slotX(s.slots - 1) + 2.5;
-        this.light.uniforms.u_street[0] = ends.left - 30;
-        this.light.uniforms.u_street[1] = ends.right + 30;
-        B.begin();
+
+        /** place a loaded model (stood upright), optionally turned, scaled and tinted */
+        const put = (geometry, x, y, z = 0, yaw = 0, scale = 1, color) => {
+            quat.setAxisAngle(Q, [0, 0, 1], yaw);
+            quat.multiply(Q, Q, A.upright);
+            T3[0] = x; T3[1] = y; T3[2] = z; S3[0] = S3[1] = S3[2] = scale;
+            parts.push({ geometry, matrix: new Float32Array(mat4.fromRotationTranslationScale(M, Q, T3, S3)), color });
+        };
+        /** a plain box, for the city in the background */
+        const block = (x, y, z, w, d, h, color) => {
+            parts.push({ geometry: UNIT_BOX, matrix: new Float32Array([w, 0, 0, 0, 0, d, 0, 0, 0, 0, h, 0, x, y, z, 1]), color });
+        };
 
         // low wall behind the stalls
-        B.add(IDENTITY, (gateL + gateR) / 2, 5.25, 0.7, gateR - gateL + 16, 0.2, 1.4, 0.15, 0.14, 0.19);
+        block((gateL + gateR) / 2, 5.3, 0.7, span + 16, 0.25, 1.4, [0.5, 0.42, 0.4]);
 
-        // gates at both ends
-        for (const [gx, hue] of [[gateL, [2.3, 0.45, 1.5]], [gateR, [0.5, 1.7, 2.3]]]) {
-            for (const gy of [-8.35, 1.75]) B.add(IDENTITY, gx, gy, 2.15, 0.26, 0.26, 4.3, 0.5, 0.13, 0.15);
-            B.add(IDENTITY, gx, -3.3, 4.35, 0.34, 10.6, 0.3, 0.5, 0.13, 0.15);
-            B.add(IDENTITY, gx, -3.3, 4.62, 0.5, 11.2, 0.14, 0.34, 0.09, 0.11);
-            B.add(IDENTITY, gx, -3.3, 4.12, 0.1, 9.8, 0.08, hue[0], hue[1], hue[2], 1);
-            for (let k = 0; k < 5; k++) B.add(IDENTITY, gx, -7 + k * 1.85, 3.78, 0.22, 0.22, 0.3, 2.1, 0.5 + (k % 2) * 0.9, 0.3, 1);
-            L.push({ x: gx, y: -3.3, z: 3.4, r: 7.5, c: [hue[0] * 0.38, hue[1] * 0.38, hue[2] * 0.38] });
+        // gates at both ends, each with its own colour of neon
+        for (const [gx, hue] of [[gateL, [2.4, 0.5, 1.5]], [gateR, [0.5, 1.7, 2.4]]]) {
+            put(P.geometry("gate"), gx, 0);
+            put(P.geometry("gate_glow"), gx, 0, 0, 0, 1, hue);
+            lights.push({ x: gx, y: -3.3, z: 3.4, r: 7.5, c: [hue[0] * 0.36, hue[1] * 0.36, hue[2] * 0.36] });
         }
 
         // slots and stalls
+        const signsWanted = [];
         for (let slot = 0; slot < s.slots; slot++) {
             const x = slotX(slot), stall = stallAt(s, slot);
-            if (!stall) { this._plot(B, x); continue; }
+            if (!stall) { put(P.geometry("plot"), x, 3.15); continue; }
             const def = STALLS[stall.type], v = stall.vendorId != null ? vendorById(s, stall.vendorId) : null, open = !!(v && v.hired && !v.off);
-            this._stall(B, x, stall.type, stall.level, open, def.color);
-            this.anchors.set("s" + stall.id, [x, 2.5, 4.05 + (stall.level === 3 ? 0.45 : 0)]);
-            if (open) L.push({ x, y: 1.35, z: 2.35, r: 6.2 + stall.level * 0.6, c: [def.color[0] * 1.25, def.color[1] * 1.25, def.color[2] * 1.25], stall: stall.id });
+            this._stall(put, A.stalls[stall.type], x, stall.level, open);
+            signsWanted.push({ type: stall.type, x, open });
+            this.anchors.set("s" + stall.id, [x, 2.6, 4.35 + (stall.level === 3 ? 0.5 : 0)]);
+            if (open) lights.push({ x, y: 1.3, z: 2.2, r: 6.4 + stall.level * 0.6, c: [def.color[0] * 1.2, def.color[1] * 1.2, def.color[2] * 1.2], stall: stall.id });
         }
-
         // the competing stall Finch opens at the end of the street
         if (s.rivalStall) {
             const x = gateR + 3.4;
-            this._stall(B, x, "rival", 1, true, [1.0, 0.12, 0.12]);
-            L.push({ x, y: 1.35, z: 2.35, r: 5.5, c: [0.9, 0.12, 0.1] });
+            this._stall(put, A.stalls.rival, x, 1, true);
+            signsWanted.push({ type: "rival", x, open: true });
+            lights.push({ x, y: 1.3, z: 2.2, r: 5.5, c: [0.9, 0.12, 0.1] });
         }
 
-        // eating area: standing tables, and lamps along the kerb
-        for (let x = gateL + 2.2, i = 0; x < gateR - 1.5; x += 3.3, i++) {
-            const y = -6.35 + (i % 2) * 0.5;
-            B.add(IDENTITY, x, y, 0.5, 0.12, 0.12, 1.0, METAL[0], METAL[1], METAL[2]);
-            B.add(IDENTITY, x, y, 1.03, 0.95, 0.95, 0.07, TOP[0], TOP[1], TOP[2]);
-            B.add(IDENTITY, x, y, 1.13, 0.09, 0.09, 0.12, 2.2, 1.5, 0.5, 1);
+        // eating area: standing tables, with planters and barrels for company; lamps along the kerb
+        for (let x = gateL + 2.2, i = 0; x < gateR - 1.5; x += 3.3, i++) put(P.geometry("table"), x, -6.35 + (i % 2) * 0.5, 0, noise(i) * TAU);
+        for (const gx of [gateL, gateR]) {
+            const out = gx === gateL ? -1 : 1;
+            put(P.geometry("planter"), gx + out * 0.2, -9.3);
+            put(P.geometry("planter"), gx + out * 0.2, 2.7, 0, 1.3);
+            put(P.geometry("barrel"), gx - out * 1.1, 1.25, 0, 0.4);
+            put(P.geometry("crate"), gx - out * 1.75, 1.35, 0, 0.3);
+            put(P.geometry("crate"), gx - out * 1.7, 1.3, 0.5, 1.1, 0.8);
         }
-        const span = gateR - gateL, lamps = Math.max(2, Math.round(span / 7.5));
+        const room = Math.max(1, 16 - lights.length - 1), lamps = Math.min(room, Math.max(2, Math.round(span / 7.5)));
         for (let i = 0; i < lamps; i++) {
             const x = gateL + (span * (i + 0.5)) / lamps;
-            // low bollard lights: tall posts here would stand between the camera and the street
-            B.add(IDENTITY, x, -8.3, 0.45, 0.2, 0.2, 0.9, METAL[0], METAL[1], METAL[2]);
-            B.add(IDENTITY, x, -8.3, 0.98, 0.3, 0.3, 0.16, WARM[0], WARM[1], WARM[2], 1);
-            L.push({ x, y: -6.9, z: 3.0, r: 9, c: [0.82, 0.6, 0.36] });
+            put(P.geometry("bollard"), x, -8.3);
+            if (i % 2 === 0) put(P.geometry("planter"), x + 1.6, -8.25, 0, i, 0.8);
+            lights.push({ x, y: -6.9, z: 3.0, r: 9, c: [0.82, 0.6, 0.36] });
         }
 
-        // a string of lanterns from gate to gate, sagging between the stalls, high enough to clear the signs
+        // a string of lanterns from gate to gate, sagging between the stalls
         const count = Math.round(span / 0.75);
         for (let k = 1; k < count; k++) {
-            const u = k / count, x = gateL + u * span, sag = Math.abs(Math.sin(u * Math.PI * Math.max(1, Math.round(span / 6))));
-            const red = k % 2 === 0;
-            B.add(IDENTITY, x, 1.7, 4.75 - sag * 0.45, 0.18, 0.18, 0.24, 1.9, red ? 0.4 : 1.35, red ? 0.25 : 0.35, 1);
+            const u = k / count, sag = Math.abs(Math.sin(u * Math.PI * Math.max(1, Math.round(span / 6))));
+            put(P.geometry("lantern"), gateL + u * span, 1.7, 5.05 - sag * 0.45, 0, 0.85, k % 2 ? [1.9, 1.35, 0.35] : [1.9, 0.4, 0.25]);
         }
 
-        // the city behind: dark blocks with lit windows and a few neon signs
+        // the city behind: blocks with lit windows and a few neon signs
         let cursor = gateL - 24, i = 0;
         while (cursor < gateR + 24) {
-            const w = 4.5 + noise(i) * 4, h = 7 + noise(i + 50) * 10, shade = 0.07 + noise(i + 90) * 0.04;
-            const cx = cursor + w / 2;
-            B.add(IDENTITY, cx, 10.5, h / 2, w - 0.3, 8, h, shade, shade, shade * 1.5);
+            const w = 4.5 + noise(i) * 4, h = 7 + noise(i + 50) * 10, tone = 0.2 + noise(i + 90) * 0.1, cx = cursor + w / 2;
+            block(cx, 10.5, h / 2, w - 0.3, 8, h, [tone, tone * 0.95, tone * 1.25]);
             const cols = Math.floor((w - 1) / 1.15), rows = Math.floor((h - 2.4) / 1.55);
             for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
-                const n = noise(i * 131 + r * 17 + c * 7.3);
-                if (n > 0.42) continue;
-                const tint = n < 0.14 ? [0.55, 0.85, 1.25] : n < 0.2 ? [1.25, 0.5, 0.95] : [1.3, 0.95, 0.5], k = 0.55 + noise(i + r * 3 + c) * 0.5;
-                B.add(IDENTITY, cx - ((cols - 1) * 1.15) / 2 + c * 1.15, 6.47, 2.6 + r * 1.55, 0.55, 0.06, 0.8, tint[0] * k, tint[1] * k, tint[2] * k, 1);
+                const n = noise(i * 131 + r * 17 + c * 7.3), wx = cx - ((cols - 1) * 1.15) / 2 + c * 1.15, wz = 2.6 + r * 1.55;
+                if (n > 0.42) { block(wx, 6.47, wz, 0.55, 0.06, 0.8, [0.1, 0.12, 0.2]); continue; }      // a dark window
+                const tint = n < 0.14 ? [0.55, 0.85, 1.25] : n < 0.2 ? [1.25, 0.5, 0.95] : [1.3, 0.95, 0.5], k = 0.6 + noise(i + r * 3 + c) * 0.5;
+                block(wx, 6.47, wz, 0.55, 0.06, 0.8, [tint[0] * k, tint[1] * k, tint[2] * k, 2]);
             }
             if (noise(i + 7) > 0.55) {
-                const col = noise(i + 3) > 0.5 ? [2.4, 0.4, 1.3] : [0.4, 1.9, 2.4];
-                B.add(IDENTITY, cx - w / 2 + 0.7, 6.3, h * 0.55, 0.3, 0.12, Math.min(4, h * 0.4), col[0], col[1], col[2], 1);
+                const col = noise(i + 3) > 0.5 ? [2.4, 0.4, 1.3, 2] : [0.4, 1.9, 2.4, 2];
+                block(cx - w / 2 + 0.7, 6.3, h * 0.55, 0.3, 0.12, Math.min(4, h * 0.4), col);
             }
             cursor += w; i++;
         }
-        B.end();
 
-        this.lights = L.slice(0, MAX_LIGHTS);
-        this.light.setCount(this.lights.length);
+        // one mesh for all of it
+        const gl = this.game.renderer.gl, old = this.street.mesh;
+        this.street.mesh = new Mesh(Geometry.merge(parts, { name: "street", uvs: false }), this.streetMaterial);
+        if (old) { old.dispose(gl); old.geometry.dispose(gl); }
+
+        // sign faces: a textured, self-lit quad on each stall's sign board
+        while (this.signs.children.length) this.signs.remove(this.signs.children[0]);
+        for (const sg of signsWanted) {
+            const key = sg.type + (sg.open ? "" : "-off");
+            let mat = this.signMaterials.get(key);
+            if (!mat) {
+                const k = sg.open ? 1.75 : 0.22;
+                mat = new StandardMaterial({ map: signTexture(sg.type), lit: false, color: [k, k, k], castShadow: false });
+                this.signMaterials.set(key, mat);
+            }
+            const e = this.signs.add(new Entity({ name: "sign", mesh: new Mesh(this.signPlane, mat) }));
+            e.interpolate = false;
+            e.setRotationEuler(Math.PI / 2, 0, 0);
+            e.setPosition(sg.x, 2.622, 3.8);
+        }
+
+        // lights, and the area the sun's shadow map covers
+        const scene = this.game.scene;
+        this.lamps = lights.slice(0, 16).map((l) => ({ ...l, light: { position: [l.x, l.y, l.z], color: [0, 0, 0], radius: l.r } }));
+        scene.pointLights = this.lamps.map((l) => l.light);
+        scene.shadow.center.set([(gateL + gateR) / 2, -1.5, 0]);
+        scene.shadow.extent.set([span / 2 + 8, 13]);
         this._writeLights(0);
         if (this.slotMode) this.showSlots(this.slotMode.kind, s, this.slotMode.except);
     }
 
-    /** An empty plot: corner marks on the concrete. */
-    _plot(B, x) {
-        for (const [dx, dy] of [[-1.2, 1.95], [1.2, 1.95], [-1.2, 4.2], [1.2, 4.2]]) {
-            B.add(IDENTITY, x + dx - Math.sign(dx) * 0.2, dy, 0.02, 0.5, 0.07, 0.03, 0.5, 0.5, 0.62, 0.35);
-            B.add(IDENTITY, x + dx, dy + (dy < 3 ? 0.2 : -0.2), 0.02, 0.07, 0.5, 0.03, 0.5, 0.5, 0.62, 0.35);
-        }
-    }
-
-    /** One stall. `open`: someone is working it tonight (the sign and lanterns are lit). */
-    _stall(B, x, type, level, open, color) {
-        const c = color, on = open ? 1 : 0.14;
-        frameAt(F, x, 0, 0);
-        B.add(F, 0, 3.15, 0.03, 2.75, 2.6, 0.06, c[0] * 0.16 + 0.06, c[1] * 0.16 + 0.06, c[2] * 0.16 + 0.07);              // mat
-        B.add(F, 0, 2.25, 0.5, 2.5, 0.6, 1.0, WOOD[0], WOOD[1], WOOD[2]);                                                  // counter
-        B.add(F, 0, 2.25, 1.03, 2.62, 0.72, 0.06, TOP[0], TOP[1], TOP[2]);
-        B.add(F, 0, 1.94, 0.55, 2.3, 0.03, 0.46, c[0] * 0.75, c[1] * 0.75, c[2] * 0.75, 0.3 * on + 0.1);                   // front panel
-        for (const px of [-1.28, 1.28]) for (const py of [2.36, 4.32]) B.add(F, px, py, 1.5, 0.1, 0.1, 3.0, METAL[0], METAL[1], METAL[2]);
-        B.add(F, 0, 4.38, 1.5, 2.66, 0.08, 3.0, 0.15, 0.14, 0.2);                                                           // back wall
-        B.add(F, 0, 4.2, 1.5, 2.3, 0.28, 0.06, WOOD[0], WOOD[1], WOOD[2]);                                                  // shelf
-        for (let k = 0; k < 4; k++) B.add(F, -0.9 + k * 0.6, 4.2, 1.66, 0.2, 0.2, 0.26, 0.5 + noise(k + x) * 0.5, 0.45, 0.3 + noise(k * 3 + x) * 0.5, 0.15);
-        B.add(F, 0, 3.4, 3.05, 2.86, 2.3, 0.12, c[0] * 0.3 + 0.05, c[1] * 0.3 + 0.05, c[2] * 0.3 + 0.06);                   // roof
-        for (let k = 0; k < 7; k++) {                                                                                        // striped awning edge
-            const w = k % 2 === 0;
-            B.add(F, -1.2 + k * 0.4, 2.27, 2.84, 0.4, 0.07, 0.34, w ? c[0] : 0.92, w ? c[1] : 0.92, w ? c[2] : 0.9, 0.18 * on);
-        }
-        // the sign, lit in the stall's colour
-        B.add(F, 0, 2.62, 3.5, 2.2, 0.08, 0.86, DARK[0], DARK[1], DARK[2]);
-        B.add(F, 0, 2.56, 3.5, 1.96, 0.08, 0.62, c[0] * 2.3 * on, c[1] * 2.3 * on, c[2] * 2.3 * on, 1);
-        for (let k = 0; k < level; k++) B.add(F, 0.62 - k * 0.2, 2.5, 3.5, 0.11, 0.06, 0.11, 2.4 * on + 0.2, 2.4 * on + 0.2, 2.2 * on + 0.2, 1);   // level pips
-        if (level >= 2) for (const px of [-1.32, 1.32]) { B.add(F, px, 2.2, 2.52, 0.05, 0.05, 0.3, METAL[0], METAL[1], METAL[2]); B.add(F, px, 2.2, 2.28, 0.26, 0.26, 0.32, WARM[0] * on, WARM[1] * on, WARM[2] * on, 1); }
-        if (level >= 3) {
-            B.add(F, 0, 2.6, 4.12, 1.3, 0.08, 0.4, 2.3 * on + 0.1, 2.2 * on + 0.1, 1.9 * on + 0.1, 1);
-            for (let k = 0; k < 9; k++) B.add(F, -1.28 + k * 0.32, 2.22, 3.14, 0.09, 0.09, 0.09, WARM[0] * on, WARM[1] * on, WARM[2] * on * (k % 2 ? 1 : 0.4), 1);
-        }
-        // what's on the counter
-        const z = 1.06;
-        if (type === "skewers") {
-            B.add(F, 0, 2.25, z + 0.07, 1.5, 0.5, 0.14, 0.12, 0.12, 0.13);
-            B.add(F, 0, 2.25, z + 0.15, 1.36, 0.36, 0.03, 2.4 * on, 0.8 * on, 0.15 * on, 1);                                // coals
-            for (let k = 0; k < 5; k++) {
-                const sx = -0.52 + k * 0.26;
-                B.add(F, sx, 2.25, z + 0.21, 0.03, 0.62, 0.03, 0.75, 0.62, 0.42);
-                for (let j = 0; j < 3; j++) B.add(F, sx, 2.1 + j * 0.15, z + 0.21, 0.09, 0.1, 0.09, j === 1 ? 0.35 : 0.72, j === 1 ? 0.6 : 0.3, 0.14);
-            }
-        } else if (type === "dumplings") {
-            for (const [bx, n] of [[-0.6, 3], [0.15, 2], [0.8, 1]]) {
-                for (let j = 0; j < n; j++) B.add(F, bx, 2.25, z + 0.08 + j * 0.15, 0.52, 0.52, 0.13, 0.8, 0.66, 0.42);
-                B.add(F, bx, 2.25, z + 0.04 + n * 0.15, 0.46, 0.46, 0.05, 0.9, 0.78, 0.55);
-            }
-        } else if (type === "noodles") {
-            B.add(F, -0.65, 2.3, z + 0.24, 0.6, 0.5, 0.48, 0.16, 0.16, 0.18);
-            B.add(F, -0.65, 2.3, z + 0.49, 0.5, 0.4, 0.03, 0.95, 0.8, 0.45, 0.3);
-            for (const bx of [0.15, 0.6, 1.0]) { B.add(F, bx, 2.2, z + 0.07, 0.3, 0.3, 0.14, 0.93, 0.93, 0.95); B.add(F, bx, 2.2, z + 0.15, 0.22, 0.22, 0.03, 0.98, 0.82, 0.3, 0.25); }
-        } else if (type === "tea") {
-            B.add(F, -0.75, 2.32, z + 0.3, 0.5, 0.42, 0.6, 0.85, 0.85, 0.9);
-            B.add(F, -0.75, 2.08, z + 0.34, 0.36, 0.03, 0.3, 0.9 * on + 0.2, 1.6 * on + 0.2, 2.2 * on + 0.2, 1);
-            [[0.82, 0.6, 0.86], [0.6, 0.86, 0.66], [0.86, 0.74, 0.56], [0.95, 0.65, 0.75]].forEach((col, k) => {
-                B.add(F, -0.05 + k * 0.33, 2.2, z + 0.15, 0.16, 0.16, 0.3, col[0], col[1], col[2], 0.2);
-                B.add(F, -0.02 + k * 0.33, 2.2, z + 0.36, 0.03, 0.03, 0.16, 0.95, 0.3, 0.4);
-            });
-        } else {
-            B.add(F, 0, 2.25, z + 0.1, 1.2, 0.4, 0.2, 0.2, 0.05, 0.05);
-        }
+    /** One stall: its body plus the parts its level adds. A stall nobody is working has its lights off. */
+    _stall(put, asset, x, level, open) {
+        // a tint alpha of 0.5 takes self-lit vertices (alpha 2) back down to ordinary ones (alpha 1)
+        const tint = open ? undefined : [0.8, 0.8, 0.85, 0.5];
+        put(asset.geometry("body"), x, 0, 0, 0, 1, tint);
+        if (level >= 2) put(asset.geometry("level2"), x, 0, 0, 0, 1, tint);
+        if (level >= 3) put(asset.geometry("level3"), x, 0, 0, 0, 1, tint);
     }
 
     _writeLights(time) {
-        this.lights.forEach((l, i) => {
+        const k0 = lerp(LIGHT.lamps[0], LIGHT.lamps[1], this.dusk);
+        this.lamps.forEach((l, i) => {
             // stall lights breathe a little; a stall in the middle of an argument flickers
-            let k = 1;
+            let k = k0;
             if (l.stall != null) {
                 const stall = this.state && this.state.stalls.find((t) => t.id === l.stall);
-                k = 0.94 + 0.06 * Math.sin(time * 2.3 + i * 1.7);
+                k *= 0.94 + 0.06 * Math.sin(time * 2.3 + i * 1.7);
                 if (stall && stall.pauseT > 0 && !this.reducedMotion) k *= 0.55 + 0.45 * Math.sin(time * 31);
             }
-            this.light.setLight(i, l.x, l.y, l.z, l.r, l.c[0] * k, l.c[1] * k, l.c[2] * k);
+            l.light.color[0] = l.c[0] * k; l.light.color[1] = l.c[1] * k; l.light.color[2] = l.c[2] * k;
         });
     }
 
@@ -261,8 +306,12 @@ export class World {
                 if (a) this.sparks.emit(Math.round((6 + e.price * 0.8 + e.tip * 2) * few), { position: [a[0], 1.6, 1.35], spread: 0.15, velocity: [0, -0.6, 3.6], speed: 1.5, life: [0.45, 0.85], size: [0.2, 0.05], color: [2.6, 1.9, 0.5, 1], colorEnd: [2.2, 1.0, 0.1, 0] });
                 if (e.mistake && a) this.steam.emit(Math.round(14 * few), { position: [a[0], 2.25, 1.3], spread: 0.3, velocity: [0, 0, 1.2], speed: 0.6, life: [0.7, 1.3], size: [0.5, 1.2], color: [0.15, 0.13, 0.13, 0.6], colorEnd: [0.1, 0.1, 0.1, 0] });
             } else if (e.type === "review") {
-                const m = this.memo.get("c" + e.id);
-                if (m && e.stars >= 4) { m.cheer = 1.2; const a = this.anchors.get("c" + e.id); if (a) this.sparks.emit(Math.round(8 * few), { position: [a[0], a[1], a[2] + 0.2], spread: 0.2, velocity: [0, 0, 2.6], speed: 1.2, life: [0.5, 0.9], size: [0.22, 0.04], color: [2.6, 0.7, 1.3, 1] }); }
+                const m = this.cast.get("c" + e.id);
+                if (m && e.stars >= 4) {
+                    m.cheer = 1.4;
+                    const a = this.anchors.get("c" + e.id);
+                    if (a) this.sparks.emit(Math.round(8 * few), { position: [a[0], a[1], a[2] + 0.2], spread: 0.2, velocity: [0, 0, 2.6], speed: 1.2, life: [0.5, 0.9], size: [0.22, 0.04], color: [2.6, 0.7, 1.3, 1] });
+                }
             } else if (e.type === "angry") {
                 const a = this.anchors.get("c" + e.id);
                 if (a) this.sparks.emit(Math.round(12 * few), { position: [a[0], a[1], a[2] + 0.1], spread: 0.15, velocity: [0, 0, 2.2], speed: 1.6, life: [0.35, 0.7], size: [0.24, 0.04], color: [3.0, 0.3, 0.2, 1] });
@@ -270,101 +319,169 @@ export class World {
                 const a = this.anchors.get("s" + e.a), b = this.anchors.get("s" + e.b);
                 if (a && b) this.sparks.emit(Math.round(50 * few), { position: [(a[0] + b[0]) / 2, 2.6, 2.0], spread: 0.5, velocity: [0, 0, 2.5], speed: 3.2, life: [0.4, 1.0], size: [0.26, 0.04], color: [3.2, 0.5, 0.15, 1] });
                 if (!this.reducedMotion) this.game.juice.shake(0.12);
-            } else if (e.type === "gone") { this.memo.delete("c" + e.id); this.anchors.delete("c" + e.id); }
+            } else if (e.type === "gone") this._remove("c" + e.id);
         }
     }
 
-    /** Forget everyone (new night, loaded save, different state). */
-    reset() { this.memo.clear(); for (const k of [...this.anchors.keys()]) if (k[0] !== "s") this.anchors.delete(k); this.steam.clear(); this.sparks.clear(); }
+    _remove(key) {
+        const m = this.cast.get(key);
+        if (m) { this.people.remove(m.character.root); this.cast.delete(key); }
+        if (key[0] === "c") this.anchors.delete(key);
+    }
 
-    _memo(key, x, y, yaw) {
-        let m = this.memo.get(key);
-        if (!m) { m = { x, y, yaw, phase: Math.random() * TAU, cheer: 0, walk: 0, seed: Math.random() * 10 }; this.memo.set(key, m); }
+    /** Forget everyone (new night, loaded save, different state). */
+    reset() {
+        for (const key of [...this.cast.keys()]) this._remove(key);
+        for (const k of [...this.anchors.keys()]) if (k[0] !== "s") this.anchors.delete(k);
+        if (this.dog) { this.people.remove(this.dog.root); this.dog = null; }
+        this.steam.clear(); this.sparks.clear();
+    }
+
+    /**
+     * The character for a key, created the first time they are seen. `kind` says what they are dressed as
+     * (a stall type for a vendor); if that changes, they are rebuilt.
+     */
+    _person(key, kind, look, options, yaw) {
+        let m = this.cast.get(key);
+        if (m && m.kind !== kind) { this._remove(key); m = null; }
+        if (!m) {
+            const character = new Character(this.assets, look, options);
+            this.people.add(character.root);
+            m = { character, kind, yaw, cheer: 0, seed: Math.random() * 10, turn: 0, stamp: 0, age: 0, h: look.h || 1 };
+            this.cast.set(key, m);
+            character.animator.time = Math.random() * 2;      // so a queue doesn't breathe in unison
+        }
+        // newcomers pop in instead of appearing
+        if (m.age < 0.35) { m.age += this._dt; m.character.root.setScale(m.h * (this.reducedMotion ? 1 : easeOutBack(Math.min(1, m.age / 0.35)))); }
         return m;
+    }
+
+    /** A burst of sparkles where something good just happened (a stall bought, an upgrade). */
+    celebrate(x, y, color = [2.6, 2.0, 0.7, 1]) {
+        const n = this.reducedMotion ? 12 : 60;
+        this.sparks.emit(n, { position: [x, y, 1.6], spread: 1.2, velocity: [0, 0, 5.5], speed: 4, life: [0.5, 1.2], size: [0.3, 0.05], color });
+        if (!this.reducedMotion) this.game.juice.shake(0.1);
     }
 
     // ------------------------------------------------------------------ per rendered frame
     /**
-     * Draw everyone. `time`: seconds, for idle motion. `dt`: frame time. `running`: the simulation is
-     * advancing (when it is paused, people hold their pose instead of jogging on the spot).
+     * Pose everyone. `time`: seconds, for idle motion. `dt`: frame time. `running`: the simulation is
+     * advancing (when it is paused, customers hold their pose).
      */
     frame(s, time, dt, running) {
         this.state = s;
-        const C = this.chars, live = s.phase === "night", A = this.anchors;
-        C.begin();
+        this._dt = dt;
+        const live = s.phase === "night", A = this.anchors, step = running ? dt : 0, stamp = ++this._stamp;
+
+        // dusk follows the market clock: sunset while you prepare, night by closing time
+        const target = live ? Math.min(1, 0.15 + ((s.t * NIGHT.dt) / NIGHT.seconds) * 0.95) : s.phase === "prep" ? 0 : 1;
+        if (Math.abs(target - this.dusk) > 0.0005) this.setDusk(this.dusk + (target - this.dusk) * Math.min(1, dt * 1.5));
+
+        for (const mesh of Object.values(this.food)) mesh.count = 0;
 
         // ---- vendors behind their counters
         for (const stall of s.stalls) {
             const v = stall.vendorId != null ? vendorById(s, stall.vendorId) : null;
             if (!v || !v.hired || v.off) continue;
-            const x = slotX(stall.slot), key = "v" + v.id, m = this._memo(key, x, STREET.vendorY, Math.PI);
-            let action = "counter", yaw = Math.PI, lookAt = 0, tempo = 1;
+            const x = slotX(stall.slot), key = "v" + v.id;
+            const m = this._person(key, stall.type, v.look, { prop: "apron", accent: STALLS[stall.type].color }, Math.PI);
+            m.stamp = stamp;
+            let clip = "counter", yaw = Math.PI, turn = 0, tempo = 1;
             const near = neighbours(s, stall);
             if (live && stall.pauseT > 0) {
                 // mid-argument: turn on the rival next door
                 const foe = near.find((n) => relation(s, v.id, n.vendor.id) === "rival");
-                action = "argue";
+                clip = "argue";
                 if (foe) yaw = Math.atan2(-(slotX(foe.stall.slot) - x), -0.6);
             } else if (live && stall.serving != null) {
                 // you can see who is quick and who is careful from their hands
-                action = "serve"; tempo = has(v, "fast") ? 1.5 : has(v, "perfectionist") ? 0.65 : 1;
-            }
-            else if (live && v.energy < 30) action = "tired";
+                clip = "serve"; tempo = has(v, "fast") ? 1.5 : has(v, "perfectionist") ? 0.65 : 1;
+            } else if (live && v.energy < 30) clip = "tired";
             else {
                 // between customers the people next door get a wave or a glare
                 const cycle = (time * 0.35 + m.seed) % 4;
                 for (const n of near) {
                     const r = relation(s, v.id, n.vendor.id, true), side = Math.sign(slotX(n.stall.slot) - x);
-                    if (r === "friend" && cycle < 0.6) { action = "wave"; lookAt = side * 1.0; }
-                    else if (r === "rival" && cycle > 2 && cycle < 3.2) lookAt = side * 1.2;
+                    if (r === "friend" && cycle < 0.7) { clip = "wave"; turn = side * 0.9; }
+                    else if (r === "rival" && cycle > 2 && cycle < 3.2) turn = side * 1.1;
                 }
                 // a showman works the crowd whenever their hands are free
-                if (action === "counter" && has(v, "showman") && cycle > 1.2 && cycle < 2) action = "show";
+                if (clip === "counter" && has(v, "showman") && cycle > 1.2 && cycle < 2.1) clip = "show";
             }
             m.yaw += shortAngle(yaw - m.yaw) * Math.min(1, dt * 9);
-            drawCharacter(C, { x, y: STREET.vendorY, yaw: m.yaw, look: v.look, action, t: (time + m.seed) * tempo, look_at: lookAt, prop: "apron", accent: STALLS[stall.type].color });
-            setAnchor(A, key, x, STREET.vendorY, 1.95 * v.look.h);
+            m.turn += (turn - m.turn) * Math.min(1, dt * 6);
+            const ch = m.character;
+            ch.root.setPosition(x, STREET.vendorY, 0); ch.root.setYaw(m.yaw);
+            ch.play(clip, { speed: tempo });
+            ch.update(dt, m.turn);
+            setAnchor(A, key, x, STREET.vendorY, 1.9 * v.look.h);
         }
         // hired but without a stall: waiting by the left gate
         let idle = 0;
         for (const v of hiredVendors(s)) {
             if (v.stallId != null && !v.off) continue;
-            const x = -1.75 - (idle >> 1) * 0.8, y = 0.9 - (idle % 2) * 0.9, key = "v" + v.id, m = this._memo(key, x, y, 0);
+            const x = -1.75 - (idle >> 1) * 0.8, y = 0.9 - (idle % 2) * 0.9, key = "v" + v.id;
             idle++;
-            drawCharacter(C, { x, y, yaw: -1.2, look: v.look, action: v.off ? "tired" : "wait", t: time + m.seed, prop: "apron" });
-            setAnchor(A, key, x, y, 1.95 * v.look.h);
+            const m = this._person(key, "idle", v.look, { prop: "apron" }, -1.2);
+            m.stamp = stamp;
+            m.character.root.setPosition(x, y, 0); m.character.root.setYaw(-1.2);
+            m.character.play(v.off ? "tired" : "wait");
+            m.character.update(dt);
+            setAnchor(A, key, x, y, 1.9 * v.look.h);
         }
 
+        // ---- managers stand by the right-hand gate with their notebooks
+        let post = 0;
+        MANAGER_IDS.forEach((id, i) => {
+            if (!s.managers || !s.managers[id]) return;
+            const x = slotX(s.slots - 1) + 1.75 + (post >> 1) * 0.8, y = 0.9 - (post % 2) * 0.9, key = "m" + i;
+            post++;
+            const m = this._person(key, "manager", MANAGERS[id].look, { prop: "notebook", accent: [0.95, 0.8, 0.3] }, 1.2);
+            m.stamp = stamp;
+            m.character.root.setPosition(x, y, 0); m.character.root.setYaw(1.2);
+            m.character.play("watch");
+            m.character.update(dt);
+            setAnchor(A, key, x, y, 1.9 * MANAGERS[id].look.h);
+        });
+
         // ---- customers
+        let kid = null;
         for (const c of s.customers) {
-            const key = "c" + c.id, m = this._memo(key, c.x, c.y, Math.atan2(-c.fx, c.fy));
-            const moved = Math.hypot(c.x - m.x, c.y - m.y);
-            m.x = c.x; m.y = c.y;
+            const key = "c" + c.id, facing = Math.atan2(-c.fx, c.fy);
+            const m = this._person(key, c.kind, c.look, { prop: PROPS[c.kind], accent: ACCENTS[c.kind] }, facing);
+            m.stamp = stamp;
             const walking = c.state === "walk" || (c.state === "queue" && !c.atSpot);
-            m.walk += ((walking && running ? 1 : 0) - m.walk) * Math.min(1, dt * 10);
-            m.phase += Math.min(moved, 0.5) * 4.6;
-            m.yaw += shortAngle(Math.atan2(-c.fx, c.fy) - m.yaw) * Math.min(1, dt * 10);
+            m.yaw += shortAngle(facing - m.yaw) * Math.min(1, dt * 10);
             if (m.cheer > 0 && running) m.cheer -= dt;
-            const tired = c.patience / c.patienceMax;
-            let action = "idle";
-            if (m.cheer > 0) action = "cheer";
-            else if (c.angry) action = "storm";
-            else if (c.state === "queue" && c.atSpot) action = tired < 0.35 ? "fidget" : "wait";
-            else if (c.state === "served") action = "reach";
-            else if (c.state === "eat") action = c.holding === "tea" ? "drink" : "eat";
-            else if (c.state === "linger") action = c.kind === "rival" ? "watch" : "wait";
-            drawCharacter(C, { x: c.x, y: c.y, yaw: m.yaw, look: c.look, walk: m.walk, phase: m.phase, action, t: time + m.seed, prop: PROPS[c.kind], holding: c.holding });
-            setAnchor(A, key, c.x, c.y, 1.95 * c.look.h);
-            if (c.kind === "kid") {
-                // Biscuit trails a step behind and sits when Pip stops
-                const bx = c.x - c.fx * 0.75 + 0.35, by = c.y - c.fy * 0.75 - 0.2;
-                m.dx = m.dx == null ? bx : m.dx + (bx - m.dx) * Math.min(1, dt * 6);
-                m.dy = m.dy == null ? by : m.dy + (by - m.dy) * Math.min(1, dt * 6);
-                m.sit = (m.sit || 0) + ((walking ? 0 : 1) - (m.sit || 0)) * Math.min(1, dt * 5);
-                drawDog(C, m.dx, m.dy, m.yaw, time, m.walk, m.sit);
-            }
+            const patience = c.patience / c.patienceMax;
+            let clip = "idle", speed = 1;
+            if (m.cheer > 0) clip = "cheer";
+            else if (walking) { clip = c.angry ? "storm" : "walk"; speed = c.speed / 2.15; }
+            else if (c.state === "queue") clip = patience < 0.35 ? "fidget" : "wait";
+            else if (c.state === "served") clip = "reach";
+            else if (c.state === "eat") clip = c.holding === "tea" ? "drink" : "eat";
+            else if (c.state === "linger") clip = c.kind === "rival" ? "watch" : "wait";
+            const ch = m.character;
+            ch.root.setPosition(c.x, c.y, 0); ch.root.setYaw(m.yaw);
+            ch.play(clip, { speed });
+            ch.update(step);
+            setAnchor(A, key, c.x, c.y, 1.9 * c.look.h);
+            if (c.holding && this.food[c.holding]) this._hold(this.food[c.holding], ch, c.x, c.y, m.yaw, c.look.h);
+            if (c.kind === "kid") kid = { c, m, walking };
         }
-        C.end();
+        // anyone not seen this frame has left (or was let go)
+        for (const [key, m] of this.cast) if (m.stamp !== stamp) { this._remove(key); if (key[0] !== "c") this.anchors.delete(key); }
+        for (const mesh of Object.values(this.food)) if (mesh.count) { mesh.markDirty(0); mesh.markDirty(mesh.count - 1); }
+
+        // ---- Biscuit trails a step behind Pip and sits when they stop
+        if (kid) {
+            if (!this.dog) { this.dog = makeDog(this.assets); this.people.add(this.dog.root); this.dog.x = kid.c.x; this.dog.y = kid.c.y; }
+            const d = this.dog, tx = kid.c.x - kid.c.fx * 0.8 + 0.35, ty = kid.c.y - kid.c.fy * 0.8 - 0.2;
+            d.x += (tx - d.x) * Math.min(1, dt * 6); d.y += (ty - d.y) * Math.min(1, dt * 6);
+            d.root.setPosition(d.x, d.y, 0); d.root.setYaw(kid.m.yaw);
+            d.animator.play(kid.walking ? "walk" : "sit");
+            d.animator.update(running ? dt : dt * 0.3);
+        } else if (this.dog) { this.people.remove(this.dog.root); this.dog = null; }
 
         // ---- steam over every working stall, more of it while serving
         this.steamClock += dt;
@@ -374,8 +491,8 @@ export class World {
                 if (!worker(s, stall) || STALLS[stall.type].drink) continue;
                 const busy = live && stall.serving != null;
                 if (Math.random() > (busy ? 0.9 : 0.25) * (this.reducedMotion ? 0.3 : 1)) continue;
-                const x = slotX(stall.slot) + (stall.type === "noodles" ? -0.65 : (Math.random() - 0.5) * 1.2);
-                this.steam.emit(1, { position: [x, 2.25, 1.35], spread: 0.12, velocity: [0, 0, 0.5], speed: 0.25, life: [0.9, 1.7], size: [0.22, 0.9], color: [0.75, 0.75, 0.8, busy ? 0.3 : 0.18], colorEnd: [0.6, 0.6, 0.7, 0] });
+                const x = slotX(stall.slot) + (stall.type === "noodles" ? -0.7 : (Math.random() - 0.5) * 1.2);
+                this.steam.emit(1, { position: [x, 2.25, 1.45], spread: 0.12, velocity: [0, 0, 0.5], speed: 0.25, life: [0.9, 1.7], size: [0.22, 0.9], color: [0.9, 0.9, 0.92, busy ? 0.3 : 0.18], colorEnd: [0.8, 0.8, 0.85, 0] });
             }
         }
 
@@ -387,16 +504,30 @@ export class World {
         this.ring.visible = !!a;
         if (a) {
             const isStall = this.selected[0] === "s";
-            this.ring.setPosition(a[0], isStall ? STREET.stallY + 0.05 : a[1], 0.08);
+            this.ring.setPosition(a[0], isStall ? STREET.stallY + 0.05 : a[1], 0.1);
             this.ring.setScale(isStall ? 1.75 : 0.5, isStall ? 1.6 : 0.5, 1);
             this.ring.setYaw(isStall ? 0 : time * 1.5);
         }
     }
 
+    /** Put one instance of a food model in a character's right hand. */
+    _hold(mesh, character, x, y, yaw, h) {
+        if (mesh.count >= mesh.capacity) return;
+        quat.setAxisAngle(Q, [0, 0, 1], yaw);
+        quat.multiply(Q, Q, this.assets.upright);
+        T3[0] = x; T3[1] = y; T3[2] = 0; S3[0] = S3[1] = S3[2] = h;
+        mat4.fromRotationTranslationScale(M, Q, T3, S3);
+        mat4.multiply(M, M, character.animator.jointMatrix(character.handR));
+        // a little below the wrist and forward, in the model's own (Y-up) space
+        T3[0] = 0; T3[1] = -0.1; T3[2] = 0.07;
+        mat4.translate(M, M, T3);
+        mesh.setMatrix(mesh.count++, M);
+    }
+
     // ------------------------------------------------------------------ picking
     /**
      * What is under this screen point? Characters win over stalls, stalls over empty plots.
-     * @returns {{ type: "customer" | "vendor" | "stall" | "slot", id: number } | null}
+     * @returns {{ type: "customer" | "vendor" | "manager" | "stall" | "slot", id: number } | null}
      */
     pick(px, py, width, height) {
         const cam = this.game.camera, out = { x: 0, y: 0, depth: 0, visible: false };
@@ -407,7 +538,7 @@ export class World {
             if (!out.visible) continue;
             // a body is taller than it is wide on screen
             const d = Math.hypot(out.x - px, (out.y - py) * 0.6);
-            if (d < bestD) { bestD = d; best = { type: key[0] === "c" ? "customer" : "vendor", id: Number(key.slice(1)) }; }
+            if (d < bestD) { bestD = d; best = { type: key[0] === "c" ? "customer" : key[0] === "m" ? "manager" : "vendor", id: Number(key.slice(1)) }; }
         }
         if (best) return best;
         const g = this.groundPoint(px, py, width, height), s = this.state;
@@ -434,4 +565,4 @@ function setAnchor(map, key, x, y, z) {
     if (a) { a[0] = x; a[1] = y; a[2] = z; } else map.set(key, [x, y, z]);
 }
 function shortAngle(d) { return ((d + Math.PI * 3) % TAU + TAU) % TAU - Math.PI; }
-
+function normalize(v) { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; }

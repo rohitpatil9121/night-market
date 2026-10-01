@@ -1,20 +1,21 @@
 /**
  * Tiny static file server for local play, with no dependencies. ES modules need HTTP, not file://.
  *
- *   npm start                      # http://localhost:8137
- *   node tools/serve.mjs 9000      # another port
+ *   npm start                          # http://localhost:8137
+ *   node tools/serve.mjs 9000          # another port
+ *   node tools/serve.mjs 9000 ../dir   # another folder
  */
 import { createServer } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const ROOT = process.argv[3] ? resolve(process.argv[3]) : resolve(fileURLToPath(new URL("..", import.meta.url)));
 const PORT = Number(process.argv[2] || process.env.PORT || 8137);
 const TYPES = {
     ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".woff2": "font/woff2", ".svg": "image/svg+xml",
-    ".png": "image/png", ".md": "text/plain; charset=utf-8", ".txt": "text/plain; charset=utf-8",
+    ".png": "image/png", ".glb": "model/gltf-binary", ".md": "text/plain; charset=utf-8", ".txt": "text/plain; charset=utf-8",
 };
 
 createServer(async (req, res) => {

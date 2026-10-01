@@ -12,7 +12,7 @@
     --cyan: #6fe6ff;
     --green: #74f0a7;
     --danger: #ff6b6b;
-    --glass: rgba(20, 14, 34, 0.62);
+    --glass: rgba(20, 14, 34, 0.8);
     --glass-strong: rgba(17, 12, 30, 0.92);
     --line: rgba(255, 196, 150, 0.16);
     --line-strong: rgba(255, 196, 150, 0.42);
@@ -117,8 +117,6 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .stats { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
 .stat b { font-size: 16px; font-weight: 500; }
 .stat .ico { font-size: 15px; color: var(--amber); }
-.stat.flash b { animation: flash 0.5s ease; }
-@keyframes flash { 30% { color: var(--amber); transform: scale(1.18); } }
 .stat.low b { color: var(--danger); }
 .topRight { display: flex; gap: 8px; align-items: center; }
 .speed { padding: 4px; gap: 2px; }
@@ -355,4 +353,51 @@ input[type="range"] { width: 160px; accent-color: var(--pink); height: 28px; }
 }
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}
+
+/* ---------------- icons, coins and other juice ---------------- */
+.ic { width: auto; height: auto; stroke: none; fill: none; flex: none; vertical-align: -0.22em; display: inline-block; }
+.ico .ic { vertical-align: middle; }
+.price .ic, .nums .ic { vertical-align: -0.2em; margin-right: 2px; }
+.stat .ico { display: grid; place-items: center; }
+.stat.cash b { min-width: 3.2em; }
+.stat.flash { animation: pillBump 0.32s var(--ease); }
+@keyframes pillBump { 35% { transform: scale(1.12); box-shadow: 0 0 26px rgba(255, 200, 61, 0.6); } }
+.coinFly { position: fixed; left: 0; top: 0; z-index: 30; margin: -11px 0 0 -11px; pointer-events: none; will-change: transform; filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.5)); }
+.tag.sold { animation: tagSold 0.35s var(--ease); }
+@keyframes tagSold { 30% { scale: 1.22; } }
+.pop.emoji .ic { filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.6)); }
+
+/* buttons you can feel: a lip underneath that the button sinks into when pressed */
+.btn, .go, .tile, .person, .choice, .stepper button, .slotPick .slots button { box-shadow: 0 3px 0 rgba(0, 0, 0, 0.35); }
+.btn:active, .tile:active, .person:active, .choice:active, .stepper button:active, .slotPick .slots button:active { transform: translateY(2px); box-shadow: 0 1px 0 rgba(0, 0, 0, 0.35); }
+.btn.primary, .go { box-shadow: 0 4px 0 #b84a52, 0 10px 30px rgba(255, 110, 120, 0.3); }
+.btn.primary:active, .go:active { transform: translateY(3px); box-shadow: 0 1px 0 #b84a52; }
+.btn.ghost { box-shadow: none; }
+
+/* managers */
+.tile.manager { width: 214px; }
+.tile.manager .head > span:first-child { gap: 9px; }
+.tile.manager .avatar { width: 30px; height: 33px; border-radius: 9px; }
+.tile.manager .avatar::before { left: 6px; right: 6px; top: 5px; height: 18px; box-shadow: 0 -5px 0 1px var(--hair); }
+.tile.manager .avatar::after { left: 10px; top: 12px; width: 3px; height: 4px; box-shadow: 7px 0 0 #15121c; }
+.tile.manager.has { border-color: rgba(116, 240, 167, 0.45); }
+.tile.manager .nums { display: flex; align-items: center; gap: 6px; color: var(--amber); }
+.tile[disabled] { opacity: 0.7; pointer-events: none; }
+
+/* while you were away */
+.bigIcon { display: block; margin: 0 auto 6px; width: 64px; height: 64px; animation: floaty 3s ease-in-out infinite; }
+@keyframes floaty { 50% { transform: translateY(-6px); } }
+.offlineCash { font-size: 44px; font-weight: 700; color: var(--amber); margin: 14px 0 2px; text-shadow: 0 0 28px rgba(255, 192, 96, 0.55); animation: starPop 0.6s cubic-bezier(0.2, 1.9, 0.4, 1) both 0.2s; }
+
+/* closing: the ledger writes itself, row by row */
+.ledger div { animation: rowIn 0.35s var(--ease) both; }
+.ledger div:nth-child(2) { animation-delay: 0.08s; } .ledger div:nth-child(3) { animation-delay: 0.16s; } .ledger div:nth-child(4) { animation-delay: 0.24s; }
+.ledger div:nth-child(5) { animation-delay: 0.32s; } .ledger div:nth-child(6) { animation-delay: 0.4s; } .ledger div:nth-child(7) { animation-delay: 0.5s; } .ledger div:nth-child(8) { animation-delay: 0.6s; }
+@keyframes rowIn { from { opacity: 0; transform: translateX(-10px); } }
+.cardHead .bigIco { display: grid; place-items: center; }
+
+@media (max-width: 760px) {
+    .tabs button { font-size: 13px; padding: 0 4px; }
+    .tile.manager { width: 190px; }
 }

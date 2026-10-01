@@ -165,6 +165,39 @@ export const REGULARS = Object.freeze({
     },
 });
 
+/**
+ * Managers: permanent help you hire once and can promote twice. Each is a person who stands on the street.
+ * levels[i]: cost to reach level i + 1, and that level's effect.
+ *   night     the street keeps trading while the game is closed: `rate` of an average night's profit per
+ *             real hour away, for up to `hours` hours
+ *   marshal   queues lose patience more slowly (multiplier)
+ *   buyer     ingredients cost less (multiplier)
+ *   promoter  more customers every night (multiplier)
+ */
+export const MANAGERS = Object.freeze({
+    night: {
+        id: "night", name: "Night manager", person: "Vikram", icon: "🌙", look: { skin: 3, shirt: 8, pants: 0, hair: 0, hairStyle: 0, h: 1.05 },
+        levels: [{ cost: 180, hours: 4, rate: 0.08 }, { cost: 320, hours: 8, rate: 0.1 }, { cost: 520, hours: 12, rate: 0.12 }],
+        text: (l) => `Keeps the street trading while you're away: ${Math.round(l.rate * 100)}% of a night's profit per hour, up to ${l.hours} hours.`,
+    },
+    marshal: {
+        id: "marshal", name: "Queue marshal", person: "Tanvi", icon: "📣", look: { skin: 1, shirt: 2, pants: 1, hair: 1, hairStyle: 2, h: 0.97 },
+        levels: [{ cost: 140, value: 0.88 }, { cost: 260, value: 0.78 }, { cost: 420, value: 0.68 }],
+        text: (l) => `Keeps the queues cheerful: customers lose patience ${Math.round((1 - l.value) * 100)}% more slowly.`,
+    },
+    buyer: {
+        id: "buyer", name: "Buyer", person: "Old Chen", icon: "🧺", look: { skin: 1, shirt: 3, pants: 2, hair: 3, hairStyle: 0, h: 0.95 },
+        levels: [{ cost: 160, value: 0.92 }, { cost: 280, value: 0.85 }, { cost: 460, value: 0.78 }],
+        text: (l) => `Haggles at the morning market: ingredients cost ${Math.round((1 - l.value) * 100)}% less.`,
+    },
+    promoter: {
+        id: "promoter", name: "Promoter", person: "Zara", icon: "📰", look: { skin: 2, shirt: 11, pants: 0, hair: 4, hairStyle: 3, h: 1.0 },
+        levels: [{ cost: 150, value: 1.08 }, { cost: 300, value: 1.15 }, { cost: 480, value: 1.22 }],
+        text: (l) => `Hands out flyers across town: ${Math.round((l.value - 1) * 100)}% more customers every night.`,
+    },
+});
+export const MANAGER_IDS = Object.freeze(Object.keys(MANAGERS));
+
 /** How loudly the HUD tells the player what to do next during the first night. */
 export const HINTS = Object.freeze({
     noStall: "Buy a stall and put it on the street.",

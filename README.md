@@ -12,8 +12,8 @@
 
 ## The game
 
-You run a neon-lit food street for ten nights. You place stalls, hire vendors, set prices, and open up. Customers
-walk in hungry, pick a stall, queue, eat, and leave a review. Rent is due every night and it keeps rising.
+You run a food street for ten nights. You place stalls, hire vendors, set prices, and open up. Customers walk in
+hungry, pick a stall, queue, eat, and leave a review. Rent is due every night and it keeps rising.
 
 The money side is a familiar tycoon loop. What makes it different is that **everyone on the street is a
 person**. Each vendor has a name, a skill level, an energy bar, a mood and two traits, and they have history
@@ -22,21 +22,24 @@ other down, and now and then stop serving to argue in front of both queues. So t
 who you hire, and who you put next to whom, matters as much as what you sell.
 
 - **4 stall types**: skewers (fast, cheap), dumplings (steady, long queue), noodles (slow, the best reviews) and
-  bubble tea (a drink, bought on top of a meal). Each upgrades twice.
+  bubble tea (a drink, bought on top of a meal). Each upgrades twice, and you can see the upgrades on the stall.
 - **8 vendor traits**: Fast Hands, Perfectionist, Chatty, Hothead, Night Owl, Penny Pincher, Showman, Mentor.
 - **Friends and rivals**: some are on record when you hire, some only come out when two people first work side by side.
 - **6 regulars** with their own rules and stories: a food critic who never says when she's coming, a broke
   student, your landlord, a rival owner scouting your best vendor, a night-shift nurse, and a kid with a dog.
 - **20 closing events**: after every night, one decision drawn from what actually happened.
+- **4 managers** you hire once and can promote twice: a queue marshal, a buyer, a promoter, and a night manager
+  who keeps the street earning **while the game is closed**.
 - **Click anyone** to see who they are and, in plain words, what each of their traits and relationships is doing right now.
 - A 10-night campaign with a 3-star rating, then **endless mode**. The campaign saves itself, even mid-night.
 
 ### One night
 
-1. **Before opening.** Place or move stalls, hire and assign vendors, set prices. No timer.
-2. **The night runs** for about three minutes at normal speed. Pause, or run at 2× or 4×. You can change prices while it runs.
+1. **Before opening**, at sunset. Place or move stalls, hire and assign vendors, set prices. No timer.
+2. **The night runs** for about three minutes at normal speed, and the light goes from sunset to night as it
+   does. Pause, or run at 2× or 4×. You can change prices while it runs.
 3. **Closing.** Takings, costs, reviews, the best and worst moments, and one event that asks you to choose.
-4. **Spend** on new stalls, upgrades or a longer street, and go again.
+4. **Spend** on new stalls, upgrades, managers or a longer street, and go again.
 
 ## Controls
 
@@ -53,8 +56,8 @@ who you hire, and who you put next to whom, matters as much as what you sell.
 | `1` `2` `3` | Speed 1× / 2× / 4× |
 | `Esc` | Cancel, close the card, or open the menu |
 
-Building and staffing also work with `Tab` and `Enter`: stalls and staff are listed in the panels, and regulars
-on the street appear as buttons in the bar at the bottom.
+Building and staffing also work with `Tab` and `Enter`: stalls, staff and managers are listed in the panels, and
+regulars on the street appear as buttons in the bar at the bottom.
 
 ## How it's built
 
@@ -63,17 +66,24 @@ No three.js and no bundler. Plain ES modules served as static files.
 ```
 night-market/
 ├── index.html, style.css     interface: title, HUD, build panels, cards, closing, event, settings
+├── models.html               model viewer: every model, with the animation clips on buttons
 ├── game/
-│   ├── data.js               every number and name: stalls, traits, regulars, economy
+│   ├── data.js               every number and name: stalls, traits, regulars, managers, economy
 │   ├── sim.js                the whole simulation (pure, deterministic, no DOM)
 │   ├── events.js             the 20 closing events and their consequences
 │   ├── bots.js               scripted players (the balance tool and the title screen use them)
-│   ├── gfx.js                the night-street material, light list, instanced box batch
-│   ├── characters.js         box-built people (and one dog) and their poses
-│   ├── world.js              the 3D scene: street, stalls, characters, particles, picking
+│   ├── assets.js             loads the models
+│   ├── characters.js         a person: skinned mesh, animator, colour palette
+│   ├── gfx.js                the street surface shader, the sky, the stall signs
+│   ├── world.js              the 3D scene: street, stalls, people, lights, particles, picking
+│   ├── icons.js              interface icons as inline SVG
 │   └── main.js               screens, input, camera, labels, saving
-├── tools/balance.mjs         headless balance check (Node)
-├── tools/serve.mjs           tiny static server for local play
+├── assets/models/*.glb       GENERATED by tools/make-models.mjs
+├── tools/
+│   ├── modelkit.mjs          tiny procedural modelling library that writes glTF binary
+│   ├── make-models.mjs       every model in the game, as code
+│   ├── balance.mjs           headless balance check
+│   └── serve.mjs             static server for local play
 ├── engine/, shaders/         Projection Lab engine (copied from the engine repo)
 └── vendor/                   pinned third-party code and fonts
 ```
@@ -84,6 +94,7 @@ night-market/
 `Math.random`: every random draw goes through a seeded generator whose seed is stored in the state. The state
 is plain JSON. One piece of code therefore drives live play, 4× fast-forward, saving and resuming mid-night,
 the bot behind the title screen, and the balance tool. `game/world.js` only reads the state and draws it.
+Even offline earnings are a pure function: the page tells it how many seconds have passed.
 
 ### Balance is checked, not guessed
 
@@ -95,48 +106,67 @@ the bot behind the title screen, and the balance tool. `game/world.js` only read
 4. ignoring who stands next to whom costs money;
 5. buying the cheapest thing every night does worse than planning.
 
-`npm run balance -- --trace sensible 7` prints one campaign night by night.
+`npm run balance -- --trace sensible 7` prints one campaign night by night. The scripted players don't hire
+managers, so these checks describe the game without that help.
+
+### The models are code
+
+There are no downloaded art assets. `tools/modelkit.mjs` is a small modelling library (lathes, lofts, rounded
+boxes, smooth normals, skin weights, baked animation clips) that writes standard `.glb` files, and
+`tools/make-models.mjs` uses it to build everything: the people and their sixteen animation clips, the dog,
+five stalls with their upgrade parts, and the street furniture. Change a shape and run:
+
+```bash
+npm run models
+```
+
+Open `models.html` to look at the results.
+
+A **person** is one skinned mesh on a 16-joint skeleton. Everyone shares the skeleton, the clips and one
+material; an individual is a colour palette (skin, shirt, trousers, hair, accent) set per mesh, a hair style
+and accessory merged into their geometry, and a height. The clips are functions of time baked to keyframes
+(walk, queue, fidget, reach, eat, drink, cheer, storm off, serve, lean on the counter, slump, argue, wave…),
+and the Animator cross-fades between them.
 
 ### Rendering: Projection Lab
 
 The engine is **[Projection Lab](https://github.com/rohitpatil9121/projection_library)**: an orbit camera on a
-sphere, a hand-built view basis and dot-product projection, with no matrix camera.
+sphere, a hand-built view basis and dot-product projection, with no matrix camera. This game drove a set of
+engine systems that now live in the engine for every future game:
 
 | Engine system | Used here for |
 |---|---|
-| `Game`, `Loop`, `Input` | Fixed 60 Hz steps, action mapping, drag / wheel / pinch |
+| `StandardMaterial`, lighting chunk | Every surface: sun, shadows, up to 16 point lights, fog |
+| `ShadowMap` | Shadows from the evening sun (and later the moon) |
+| `PostFX` ambient occlusion | The soft darkening under stalls, tables and feet |
+| `loadGLTF`, `Geometry.merge` | Loading the models; merging the whole street into one mesh |
+| `Skeleton`, `Animator`, `SkinnedMesh` | The people and the dog |
+| `Texture` | Stall signs, drawn on a 2D canvas |
+| `PostFX` bloom, `Sky`, `ParticleSystem` | Glowing signs and lanterns, the sunset-to-night sky, steam and sparks |
 | `Camera` | The tycoon view, plus `project()` for labels and `screenRay()` for picking |
-| `InstancedMesh` | Every box on the street in two draw calls |
-| `ShaderMaterial`, `projectLab()` | The night-street material and the ground |
-| `Sky` | A custom city-night sky shader |
-| `PostFX` | HDR bloom on signs and lanterns, tone mapping, vignette, grain |
-| `ParticleSystem` | Steam, coins, sparks when rivals argue |
-| `Juice`, `Audio` | Camera shake, synthesised sound (ZzFX) and an ambient drone |
+| `Game`, `Loop`, `Input`, `Juice`, `Audio` | Fixed 60 Hz steps, input, camera shake, synthesised sound |
 
-Three things the engine doesn't have, and what the game does instead:
+**Draw calls.** The street (stalls, tables, gates, lanterns, the city behind) is merged into a single mesh
+whenever the layout changes, so it is one draw call however long the street gets. Each person is one more. A
+full endless-mode street measured 67 draw calls and 56 more in the shadow pass, for about 175,000 triangles.
 
-- **Point lights.** The engine lights with one sun and a hemisphere ambient. `game/gfx.js` adds a material that
-  reads up to 24 coloured point lights from uniform arrays: one per open stall, plus lamps and gates. The street
-  surface reads the same list, which is what puts a pool of colour on the ground in front of each stall. A stall
-  with nobody working it has no light and a dark sign.
-- **Skeletal animation.** A character is about 14 boxes on a small hand-built skeleton (hips, torso, head, two
-  arms, two legs). Poses are a few joint angles per action: walking, queueing, fidgeting, reaching, eating,
-  cheering, storming off, serving, arguing, waving.
-- **Text.** Stall tags, name tags, prices and the icons over vendors' heads are DOM elements placed each frame
-  with `camera.project()`.
+**Light.** One sun that casts shadows, a point light for each open stall, lamp and gate, and ambient
+occlusion. The sun's colour and strength, the ambient light, the fog and the sky all follow the market clock,
+so you set up in warm evening light and close under the lanterns. A stall with nobody working it has its
+lights off.
 
-**Draw calls.** The renderer draws once per entity mesh, so 50 six-part characters as entities would be 300 draw
-calls before any stalls. Instead every solid thing is a unit box in one of two `InstancedMesh` batches: street
-furniture (rebuilt only when the layout changes) and characters (rewritten every frame). A unit cube with a
-per-instance matrix shades correctly even when stretched, because a box's face normals lie along its own axes.
-A full endless-mode street (8 stalls, 35 customers, about 1,000 boxes) renders in **5 draw calls**.
+**Text and icons.** Stall tags, names, prices and the icons over vendors' heads are DOM elements placed each
+frame with `camera.project()`. Interface icons are inline SVG.
 
-## Accessibility
+## Accessibility and performance
 
 - Every control is a real button or select with a label; visible focus rings; touch targets of at least 44 px
-- Stalls, staff and regulars can all be reached from the panels without the mouse; ordinary customers can only be picked by clicking them
-- **Reduce motion** (also follows the system setting): no camera shake or title drift, fewer particles
-- Bloom can be switched off for slower devices
+- Stalls, staff, managers and regulars can all be reached from the panels without the mouse; ordinary
+  customers can only be picked by clicking them
+- **Reduce motion** (also follows the system setting): no camera shake, title drift, pop-in or flying coins, fewer particles
+- **Bloom** and **shadows and soft shading** can each be switched off for slower devices
+- If frames stay slow for a few seconds the game lowers its own quality (ambient occlusion first, then
+  resolution, then shadows) and says so
 - On phones the build panel, the cards and the speed buttons sit at the bottom of the screen
 
 ## Run locally
