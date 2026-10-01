@@ -150,6 +150,7 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .go:active { transform: scale(0.97); }
 .go.notReady { filter: saturate(0.35) brightness(0.8); box-shadow: none; }
 .go svg { stroke-width: 2.4; }
+.go .short { display: none; }
 
 /* things that live in the panel */
 .tile { flex: none; width: 184px; padding: 9px 12px; border-radius: 15px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.035); cursor: pointer; text-align: left;
@@ -333,7 +334,8 @@ input[type="range"] { width: 160px; accent-color: var(--pink); height: 28px; }
     .tabs button { min-width: 0; flex: 1; text-align: center; padding: 0 8px; }
     .panel { grid-area: panel; min-height: 132px; }
     .go { grid-area: go; flex-direction: row; min-width: 0; min-height: 44px; padding: 0 14px; border-radius: 13px; }
-    .go br { display: none; }
+    .go .long { display: none; }
+    .go .short { display: inline; }
     .status { font-size: 14px; }
     .nightBar { grid-template-columns: repeat(4, 1fr); grid-template-areas: none; }
     .nightBar .fact { min-width: 0; padding: 6px 8px; }
@@ -398,6 +400,8 @@ input[type="range"] { width: 160px; accent-color: var(--pink); height: 28px; }
 .cardHead .bigIco { display: grid; place-items: center; }
 
 @media (max-width: 760px) {
-    .tabs button { font-size: 13px; padding: 0 4px; }
+    .tabs button { font-size: 13px; padding: 0 2px; flex: 1 1 auto; }
+    .tabs { gap: 2px; }
+    .go { padding: 0 10px; gap: 4px; }
     .tile.manager { width: 190px; }
 }

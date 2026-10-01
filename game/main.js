@@ -1140,19 +1140,29 @@ game.onUpdate((dt) => {
 
 // ------------------------------------------------------------------ keeping the frame rate up
 /**
- * If frames stay slow for a few seconds, give up the most expensive effects one at a time, cheapest
- * loss first. Nothing is written to the saved settings: a slow moment shouldn't change them for good.
+ * If the GPU can't keep up, give up the most expensive effects one at a time, cheapest loss first.
+ * Nothing is written to the saved settings: a slow moment shouldn't change them for good.
+ *
+ * The time between frames is no guide (a browser throttles a window in the background without marking
+ * it hidden), so every few seconds one frame is drawn a second time with the GPU made to finish, and
+ * that is what gets timed.
  */
-const quality = { slow: 0, step: 0, steps: [
+const quality = { frames: 0, slow: 0, step: 0, last: 0, steps: [
     () => { renderer.postfx.settings.ao.enabled = false; },
     () => { renderer.resolutionScale = 0.8; renderer.resize(); },
     () => { scene.shadow.enabled = false; },
     () => { renderer.resolutionScale = 0.65; renderer.resize(); },
 ] };
-function watchFrameRate(frameDelta) {
-    if (document.hidden || app.menu || quality.step >= quality.steps.length) return;
-    // count time spent above 28 ms a frame (under ~35 fps); a single hitch decays away
-    quality.slow = frameDelta > 0.028 ? quality.slow + frameDelta : Math.max(0, quality.slow - frameDelta * 0.5);
+function watchFrameRate() {
+    if (document.hidden || app.menu || quality.step >= quality.steps.length || ++quality.frames % 150) return;
+    const gl = renderer.gl;
+    gl.finish();
+    const t0 = performance.now();
+    renderer.render(scene, camera, 1);
+    gl.finish();
+    quality.last = performance.now() - t0;
+    // 24 ms of GPU work leaves no room for 60 frames a second, and little for 30 once the page's own work is added
+    quality.slow = quality.last > 24 ? quality.slow + 1 : 0;
     if (quality.slow < 3) return;
     quality.slow = 0;
     quality.steps[quality.step++]();
@@ -1163,7 +1173,7 @@ function watchFrameRate(frameDelta) {
 game.onRender((frameDelta) => {
     const S = cur();
     if (!S) return;
-    watchFrameRate(frameDelta);
+    watchFrameRate();
     updateCamera(frameDelta);
     const running = !app.menu && (app.mode === "title" || (app.mode === "night" && app.speed > 0));
     world.frame(S, game.loop.realTime, frameDelta, running);
@@ -1179,4 +1189,4 @@ game.start();
 $("fade").classList.remove("on");
 
 // testing / console hook
-window.market = { app, game, world, sim, save, view, goal, BOTS, playNight, startCampaign, openNight, setSpeed, select, goTitle };
+window.market = { app, game, world, sim, save, view, goal, quality, BOTS, playNight, startCampaign, openNight, setSpeed, select, goTitle };

@@ -165,8 +165,8 @@ frame with `camera.project()`. Interface icons are inline SVG.
   customers can only be picked by clicking them
 - **Reduce motion** (also follows the system setting): no camera shake, title drift, pop-in or flying coins, fewer particles
 - **Bloom** and **shadows and soft shading** can each be switched off for slower devices
-- If frames stay slow for a few seconds the game lowers its own quality (ambient occlusion first, then
-  resolution, then shadows) and says so
+- If the GPU can't keep up the game lowers its own quality (ambient occlusion first, then resolution, then
+  shadows) and says so. It times real GPU work to decide, not the gap between frames
 - On phones the build panel, the cards and the speed buttons sit at the bottom of the screen
 
 ## Run locally
