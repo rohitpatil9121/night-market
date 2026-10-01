@@ -243,9 +243,12 @@ function vendorMark(S, v) {
         if (r === "friend" && !out.includes("💛")) out += "💛";
         if (r === "rival" && !out.includes("💢")) out += "💢";
     }
+    if (sim.has(v, "mentor") && sim.neighbours(S, stall).length) out += "🎓";
     if (S.phase === "night") {
         if (v.energy < VENDOR.tiredBelow) out += "💤";
         if (sim.has(v, "hothead") && stall.queue.length >= TRAITS.hothead.queue) out += "🔥";
+        if (sim.has(v, "chatty") && stall.queue.length >= 2) out += "💬";
+        if (sim.has(v, "owl") && sim.nightClock(S).frac > TRAITS.owl.after) out += "🦉";
     }
     return out;
 }
@@ -518,6 +521,7 @@ function renderCard() {
     const card = $("card"), S = app.S, sel = app.sel;
     cardLive = [];
     nameTag.textContent = "";
+    document.body.classList.toggle("hasCard", !!sel && !!S && app.mode !== "title");
     if (!sel || !S || app.mode === "title") { card.classList.add("hidden"); return; }
     const prep = app.mode === "prep", closeBtn = `<button class="iconBtn x" data-act="close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>`;
     let html = "";
@@ -537,7 +541,7 @@ function renderCard() {
         }
         html += `<span class="fieldLabel">PRICE PER PLATE</span><div class="stepper"><button data-act="price" data-d="-1" aria-label="Lower the price">−</button><b id="cPrice">$${stall.price}</b><button data-act="price" data-d="1" aria-label="Raise the price">+</button><small id="cPriceNote"></small></div>`;
         html += `<div style="margin-top:12px">`;
-        if (!prep) html += `<div class="kv"><span>Worked by</span><b>${v ? `<button class="btn small ghost" style="min-height:30px;padding:2px 8px" data-go-vendor="${v.id}">${esc(v.name)} →</button>` : "nobody"}</b></div>`;
+        if (!prep) html += `<div class="kv"><span>Worked by</span><b>${v ? `<button class="btn small ghost" style="padding:2px 8px" data-go-vendor="${v.id}">${esc(v.name)} →</button>` : "nobody"}</b></div>`;
         html += `<div class="kv"><span>One customer every</span><b id="cServe"></b></div><div class="parts" id="cParts"></div>
             <div class="kv"><span>Queue</span><b id="cQueue"></b></div>
             <div class="kv"><span>Tonight</span><b id="cTonight"></b></div>

@@ -31,7 +31,7 @@ const ROOT = mat4.create(), TORSO = mat4.create(), HEAD = mat4.create(), LIMB = 
  * @property {Object} look          { skin, shirt, pants, hair, hairStyle, h }
  * @property {number} [walk]        0..1, how much of the walk cycle to apply
  * @property {number} [phase]       walk-cycle phase, radians
- * @property {string} [action]      idle | wait | fidget | reach | eat | drink | cheer | storm | serve | counter | tired | argue | wave | watch
+ * @property {string} [action]      idle | wait | fidget | reach | eat | drink | cheer | storm | serve | counter | tired | argue | wave | show | watch
  * @property {number} [t]           seconds, drives the action's own motion
  * @property {number} [look_at]     head turn, radians
  * @property {string} [prop]        notebook | backpack | tophat | shades | cap | apron
@@ -63,6 +63,7 @@ export function drawCharacter(batch, p) {
     else if (act === "tired") { lean = 0.38; nod = 0.35; armL = 0.1; armR = 0.1; bob = Math.sin(t * 1.5) * 0.02 - 0.05; }
     else if (act === "argue") { lean = 0.22; armR = 2.1 + Math.sin(t * 17) * 0.45; armL = 0.4; spreadL = 0.5; nod = Math.sin(t * 11) * 0.12; }
     else if (act === "wave") { armR = 2.8; spreadR = 0.35 + Math.sin(t * 9) * 0.35; }
+    else if (act === "show") { armL = 2.5; armR = 2.5; spreadL = 0.7 + Math.sin(t * 6) * 0.2; spreadR = 0.7 + Math.sin(t * 6) * 0.2; bob = Math.abs(Math.sin(t * 6)) * 0.06; }
     else if (act === "watch") { armR = 2.2; spreadR = -0.5; nod = 0.08; }
 
     // ---- skeleton

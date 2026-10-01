@@ -1,6 +1,6 @@
 import { Entity, Mesh, BasicMaterial, ParticleSystem, primitives, mat4 } from "../engine/index.js";
 import { STREET, STALLS } from "./data.js";
-import { slotX, streetEnds, stallAt, worker, vendorById, hiredVendors, neighbours, relation } from "./sim.js";
+import { slotX, streetEnds, stallAt, worker, vendorById, hiredVendors, neighbours, relation, has } from "./sim.js";
 import { createLighting, BoxBatch, frameAt, IDENTITY, MAX_LIGHTS } from "./gfx.js";
 import { drawCharacter, drawDog } from "./characters.js";
 
@@ -71,7 +71,8 @@ export class World {
     rebuild(s) {
         this.state = s;
         const B = this.statics, L = [];
-        for (const k of [...this.anchors.keys()]) if (k[0] === "s") this.anchors.delete(k);
+        // forget stalls that were sold and vendors who have left
+        for (const k of [...this.anchors.keys()]) if (k[0] === "s" || (k[0] === "v" && !vendorById(s, Number(k.slice(1)))?.hired)) this.anchors.delete(k);
         const ends = streetEnds(s), gateL = -2.5, gateR = slotX(s.slots - 1) + 2.5;
         this.light.uniforms.u_street[0] = ends.left - 30;
         this.light.uniforms.u_street[1] = ends.right + 30;
@@ -297,14 +298,17 @@ export class World {
             const v = stall.vendorId != null ? vendorById(s, stall.vendorId) : null;
             if (!v || !v.hired || v.off) continue;
             const x = slotX(stall.slot), key = "v" + v.id, m = this._memo(key, x, STREET.vendorY, Math.PI);
-            let action = "counter", yaw = Math.PI, lookAt = 0;
+            let action = "counter", yaw = Math.PI, lookAt = 0, tempo = 1;
             const near = neighbours(s, stall);
             if (live && stall.pauseT > 0) {
                 // mid-argument: turn on the rival next door
                 const foe = near.find((n) => relation(s, v.id, n.vendor.id) === "rival");
                 action = "argue";
                 if (foe) yaw = Math.atan2(-(slotX(foe.stall.slot) - x), -0.6);
-            } else if (live && stall.serving != null) action = "serve";
+            } else if (live && stall.serving != null) {
+                // you can see who is quick and who is careful from their hands
+                action = "serve"; tempo = has(v, "fast") ? 1.5 : has(v, "perfectionist") ? 0.65 : 1;
+            }
             else if (live && v.energy < 30) action = "tired";
             else {
                 // between customers the people next door get a wave or a glare
@@ -314,16 +318,18 @@ export class World {
                     if (r === "friend" && cycle < 0.6) { action = "wave"; lookAt = side * 1.0; }
                     else if (r === "rival" && cycle > 2 && cycle < 3.2) lookAt = side * 1.2;
                 }
+                // a showman works the crowd whenever their hands are free
+                if (action === "counter" && has(v, "showman") && cycle > 1.2 && cycle < 2) action = "show";
             }
             m.yaw += shortAngle(yaw - m.yaw) * Math.min(1, dt * 9);
-            drawCharacter(C, { x, y: STREET.vendorY, yaw: m.yaw, look: v.look, action, t: time + m.seed, look_at: lookAt, prop: "apron", accent: STALLS[stall.type].color });
+            drawCharacter(C, { x, y: STREET.vendorY, yaw: m.yaw, look: v.look, action, t: (time + m.seed) * tempo, look_at: lookAt, prop: "apron", accent: STALLS[stall.type].color });
             setAnchor(A, key, x, STREET.vendorY, 1.95 * v.look.h);
         }
         // hired but without a stall: waiting by the left gate
         let idle = 0;
         for (const v of hiredVendors(s)) {
             if (v.stallId != null && !v.off) continue;
-            const x = -1.0 - idle * 0.85, y = 0.7 - (idle % 2) * 0.7, key = "v" + v.id, m = this._memo(key, x, y, 0);
+            const x = -1.75 - (idle >> 1) * 0.8, y = 0.9 - (idle % 2) * 0.9, key = "v" + v.id, m = this._memo(key, x, y, 0);
             idle++;
             drawCharacter(C, { x, y, yaw: -1.2, look: v.look, action: v.off ? "tired" : "wait", t: time + m.seed, prop: "apron" });
             setAnchor(A, key, x, y, 1.95 * v.look.h);

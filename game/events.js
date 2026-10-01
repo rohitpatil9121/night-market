@@ -63,7 +63,7 @@ export const EVENTS = {
     },
     landlordAngry: {
         priority: 80, who: "landlord", repeat: 3, title: () => "The landlord was kept waiting",
-        find: (s) => (s.stats.landlord && (s.stats.landlord.angry || s.stats.landlord.wait > 14) ? { wait: Math.round(s.stats.landlord.wait) } : null),
+        find: (s) => (s.stats.landlord && (s.stats.landlord.angry || s.stats.landlord.wait > 11) ? { wait: Math.round(s.stats.landlord.wait) } : null),
         text: (s, c) => `Mr. Okafor stood in a queue for ${c.wait} seconds tonight. He has decided that a street this busy can afford more rent.`,
         choices: [
             { label: "Pay a goodwill fee", cost: 45, detail: () => "Rent stays on its current track.", apply: () => "He pockets it and says no more about it." },
@@ -73,7 +73,7 @@ export const EVENTS = {
     },
     landlordPleased: {
         priority: 70, who: "landlord", repeat: 3, title: () => "The landlord ate well",
-        find: (s) => (s.stats.landlord && !s.stats.landlord.angry && s.stats.landlord.wait <= 14 && s.stats.landlord.stars >= 4 ? {} : null),
+        find: (s) => (s.stats.landlord && !s.stats.landlord.angry && s.stats.landlord.wait <= 11 && s.stats.landlord.stars >= 4 ? {} : null),
         text: () => "Mr. Okafor was served quickly and finished the bowl. He is in an unusually good mood and asks, almost kindly, if there's anything you need.",
         choices: [
             { label: "A rent freeze", detail: () => "Rent doesn't rise for the next 2 nights.", apply: (s) => { s.rentFreeze = 2; return "\"Two nights. Don't tell the others.\""; } },
@@ -143,7 +143,7 @@ export const EVENTS = {
         ],
     },
     raise: {
-        priority: 60, repeat: 2, who: (s, c) => c.v, title: (s, c) => `${V(s, c.v).name} asks for a raise`,
+        priority: 60, repeat: 3, who: (s, c) => c.v, title: (s, c) => `${V(s, c.v).name} asks for a raise`,
         find: (s) => {
             const v = working(s).filter((x) => { const pv = s.stats.perVendor[x.id]; return pv.served >= 12 && avgStars(pv) >= 3.7 && x.nights >= 2 && s.night - x.lastRaise >= 3; })
                 .sort((a, b) => s.stats.perVendor[b.id].served - s.stats.perVendor[a.id].served)[0];
@@ -249,19 +249,30 @@ export const EVENTS = {
     },
 };
 const ORDER = Object.keys(EVENTS);
+/**
+ * 3: story beats that must not be missed (a regular's arc, someone about to quit).
+ * 2: everyday staff matters. 1: things that just happen on a street.
+ */
+const TIER = {
+    student: 3, studentPayoff: 3, critic: 3, landlordAngry: 3, landlordPleased: 3, poach: 3, nurse: 3, kid: 3, quitThreat: 3, festival: 3,
+    rivalFight: 2, exhausted: 2, raise: 2, friendship: 2, mentor: 2,
+    inspector: 1, supplier: 1, rain: 1, musician: 1, wallet: 1,
+};
 
 /** Choose tonight's event. Called once by the simulation when the night closes. */
 export function pickEvent(s) {
-    let best = null, bestP = -1;
+    const found = [];
     for (const id of ORDER) {
         const e = EVENTS[id], last = s.eventNight[id];
         if (last != null && (!e.repeat || s.night - last < e.repeat)) continue;
         const ctx = e.find(s);
-        if (!ctx) continue;
-        const p = e.priority + rnd(s) * (e.jitter ?? 6);
-        if (p > bestP) { bestP = p; best = { id, ctx }; }
+        if (ctx) found.push({ id, ctx, tier: TIER[id], p: e.priority + rnd(s) * (e.jitter ?? 6) });
     }
-    if (!best) return null;
+    if (!found.length) return null;
+    // story beats always win; otherwise staff matters and street happenings take turns, so neither crowds the other out
+    let tier = Math.max(...found.map((f) => f.tier));
+    if (tier === 2 && found.some((f) => f.tier === 1) && chance(s, 0.45)) tier = 1;
+    const best = found.filter((f) => f.tier === tier).sort((a, b) => b.p - a.p)[0];
     s.eventNight[best.id] = s.night;
     return { id: best.id, ctx: best.ctx, done: false, choice: -1, result: "" };
 }

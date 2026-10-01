@@ -170,5 +170,5 @@ export const HINTS = Object.freeze({
     noStall: "Buy a stall and put it on the street.",
     noVendor: "Hire a vendor to run it.",
     unstaffed: "A stall has nobody working it. Assign a vendor.",
-    ready: "Ready. Open for the night.",
+    ready: "Ready to open. People crave different things, so a second kind of stall catches more of the crowd.",
 });
