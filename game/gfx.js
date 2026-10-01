@@ -1,4 +1,5 @@
-import { ShaderMaterial, Sky, Texture, Geometry, Mesh, projectionChunk, lightingChunk } from "../engine/index.js";
+import { ShaderMaterial, StandardMaterial, Sky, Texture, Geometry, Mesh, projectionChunk, lightingChunk } from "../engine/index.js";
+import { vertex as standardVertex } from "../shaders/standard/standard.js";
 import { STALLS, STALL_TYPES } from "./data.js";
 import { iconImages } from "./icons.js";
 
@@ -10,6 +11,8 @@ import { iconImages } from "./icons.js";
  *   createSky()             an evening sky that darkens from sunset to night
  *   signTexture(type)       a stall's sign, drawn on a 2D canvas
  *   createRain()            falling streaks, animated entirely in the vertex shader
+ *   ToonMaterial            the engine's StandardMaterial with a cartoon fragment shader: two-tone sunlight,
+ *                           richer colour, and a dark edge that reads as an outline on rounded things
  * @module game/gfx
  */
 
@@ -68,6 +71,55 @@ void main() {
 
 export function createGroundMaterial() {
     return new ShaderMaterial({ name: "market-ground", vertex: groundVertex, fragment: groundFragment, castShadow: false, uniforms: { u_street: new Float32Array([-40, 60]), u_wet: 0 } });
+}
+
+const toonFragment = /* glsl */ `
+${lightingChunk}
+uniform vec4 u_color;
+uniform vec3 u_emissive;
+uniform float u_edge;       // 0 = no outline; otherwise how far in from the silhouette the dark edge reaches
+varying vec3 v_normal;
+varying vec3 v_world;
+varying vec4 v_tint;
+
+void main() {
+    vec3 base = u_color.rgb * v_tint.rgb;
+    float glow = clamp(v_tint.a - 1.0, 0.0, 1.0);
+    vec3 n = normalize(v_normal);
+    if (!gl_FrontFacing) n = -n;
+    vec3 view = normalize(u_camPos - v_world);
+
+    // sunlight in two tones: a surface is either turned to the sun or it isn't, with a short soft seam
+    float facing = dot(n, u_sunDirection);
+    float band = smoothstep(0.0, 0.16, facing);
+    vec3 sun = band > 0.0 ? u_sunColor * band * (0.6 + 0.4 * max(facing, 0.0)) * labShadow(v_world, n) : vec3(0.0);
+    vec3 rgb = base * (labAmbient(n) * 1.2 + sun + labPoints(v_world, n));
+
+    // richer colour, and a thin light along the top edges
+    float grey = dot(rgb, vec3(0.3, 0.59, 0.11));
+    rgb = mix(vec3(grey), rgb, 1.22);
+    rgb += base * u_skyColor * pow(1.0 - max(dot(n, view), 0.0), 3.0) * max(n.z, 0.0) * 1.4;
+
+    // where the surface turns away from the camera, darken it: an outline without drawing anything twice
+    if (u_edge > 0.0) rgb *= 1.0 - 0.72 * smoothstep(u_edge, u_edge * 0.5, dot(n, view));
+
+    rgb = labFog(rgb, v_world);
+    rgb = mix(rgb, base, glow) + u_emissive;
+    gl_FragColor = vec4(rgb, u_color.a);
+}
+`;
+
+/**
+ * StandardMaterial's vertex shader (so instancing, skinning, vertex colours and palettes all work) with the
+ * cartoon fragment shader above. `edge`: 0 for none, about 0.4 for a dark rim on rounded shapes.
+ */
+export class ToonMaterial extends StandardMaterial {
+    constructor(options = {}) {
+        super(options);
+        this.shader = { name: "market-toon", vertex: standardVertex, fragment: toonFragment };
+        this.edge = options.edge ?? 0;
+    }
+    uniforms() { const u = super.uniforms(); u.u_edge = this.edge; return u; }
 }
 
 const rainVertex = /* glsl */ `

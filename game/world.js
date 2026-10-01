@@ -1,7 +1,7 @@
 import { Entity, Mesh, InstancedMesh, Geometry, BasicMaterial, StandardMaterial, ShadowMap, ParticleSystem, primitives, mat4, quat } from "../engine/index.js";
 import { STREET, STALLS, STALL_TYPES, LEVELS, NIGHT, MANAGERS, MANAGER_IDS } from "./data.js";
 import { slotX, streetEnds, stallAt, worker, vendorById, hiredVendors, neighbours, relation, has, tables, seatCount, seatSpot } from "./sim.js";
-import { createGroundMaterial, createSky, signTexture, createRain } from "./gfx.js";
+import { createGroundMaterial, createSky, signTexture, createRain, ToonMaterial } from "./gfx.js";
 import { Character, makeDog } from "./characters.js";
 
 /**
@@ -64,7 +64,7 @@ export class World {
         this.ground.setPosition(14, -4, 0);
 
         // the street: one merged mesh, replaced by rebuild()
-        this.streetMaterial = new StandardMaterial({ vertexColors: true });
+        this.streetMaterial = new ToonMaterial({ vertexColors: true });
         this.street = this.root.add(new Entity({ name: "street" }));
         this.signs = this.root.add(new Entity({ name: "signs" }));
         this.signPlane = primitives.plane(1.96, 0.62);
@@ -78,7 +78,7 @@ export class World {
 
         // what people carry away: one instanced mesh per kind of food
         this.food = {};
-        const foodMaterial = new StandardMaterial({ vertexColors: true });
+        const foodMaterial = new ToonMaterial({ vertexColors: true });
         for (const type of STALL_TYPES) {
             const mesh = new InstancedMesh(assets.props.geometry("food_" + type), foodMaterial, 96);
             mesh.count = 0;
@@ -328,6 +328,10 @@ export class World {
             if (e.type === "served") {
                 const a = this.anchors.get("s" + e.stallId);
                 if (a) this.sparks.emit(Math.round((6 + e.price * 0.8 + e.tip * 2) * few), { position: [a[0], 1.6, 1.35], spread: 0.15, velocity: [0, -0.6, 3.6], speed: 1.5, life: [0.45, 0.85], size: [0.2, 0.05], color: [2.6, 1.9, 0.5, 1], colorEnd: [2.2, 1.0, 0.1, 0] });
+                // the customer and the vendor both give a little hop as the plate changes hands
+                const who = this.cast.get("c" + e.id), by = this.cast.get("v" + e.vendorId);
+                if (who) who.hop = 0.32;
+                if (by) by.hop = 0.22;
                 if (e.mistake && a) this.steam.emit(Math.round(14 * few), { position: [a[0], 2.25, 1.3], spread: 0.3, velocity: [0, 0, 1.2], speed: 0.6, life: [0.7, 1.3], size: [0.5, 1.2], color: [0.15, 0.13, 0.13, 0.6], colorEnd: [0.1, 0.1, 0.1, 0] });
             } else if (e.type === "review") {
                 const m = this.cast.get("c" + e.id);
@@ -452,11 +456,11 @@ export class World {
             m.yaw += shortAngle(yaw - m.yaw) * Math.min(1, dt * 9);
             m.turn += (turn - m.turn) * Math.min(1, dt * 6);
             const ch = m.character;
-            ch.root.setPosition(x, STREET.vendorY, 0); ch.root.setYaw(m.yaw);
+            ch.root.setPosition(x, STREET.vendorY, this._hop(m, step, 0.1)); ch.root.setYaw(m.yaw);
             ch.setFace(clip === "argue" ? "angry" : clip === "tired" ? "tired" : v.mood < 35 ? "annoyed" : clip === "wave" || clip === "show" || v.mood > 78 ? "happy" : "neutral");
             ch.play(clip, { speed: tempo });
             ch.update(dt, m.turn);
-            setAnchor(A, key, x, STREET.vendorY, 1.9 * v.look.h);
+            setAnchor(A, key, x, STREET.vendorY, 2.05 * v.look.h);
         }
         // hired but without a stall: waiting by the left gate
         let idle = 0;
@@ -506,11 +510,11 @@ export class World {
             else if (c.state === "eat") clip = (seated ? "sit_" : "") + (c.holding === "tea" ? "drink" : "eat");
             else if (c.state === "linger") clip = c.kind === "rival" || c.kind === "inspector" ? "watch" : "wait";
             const ch = m.character;
-            ch.root.setPosition(c.x, c.y, 0); ch.root.setYaw(m.yaw);
+            ch.root.setPosition(c.x, c.y, this._hop(m, step, 0.2)); ch.root.setYaw(m.yaw);
             ch.setFace(c.angry ? "angry" : m.cheer > 0 || c.happy || c.state === "eat" ? "happy" : c.state === "queue" && patience < 0.35 ? "annoyed" : c.state === "queue" && patience < 0.6 ? "neutral" : m.seed > 7 ? "happy" : "neutral");
             ch.play(clip, { speed });
             ch.update(step);
-            setAnchor(A, key, c.x, c.y, (seated ? 1.6 : 1.9) * c.look.h);
+            setAnchor(A, key, c.x, c.y, (seated ? 1.75 : 2.05) * c.look.h);
             if (c.holding && this.food[c.holding]) this._hold(this.food[c.holding], ch, c.x, c.y, m.yaw, c.look.h);
             if (c.kind === "kid") kid = { c, m, walking };
         }
@@ -553,6 +557,13 @@ export class World {
             this.ring.setScale(isStall ? 1.75 : 0.5, isStall ? 1.6 : 0.5, 1);
             this.ring.setYaw(isStall ? 0 : time * 1.5);
         }
+    }
+
+    /** Height of a character's hop this frame (0 when not hopping). `m.hop` counts down the seconds left. */
+    _hop(m, dt, height) {
+        if (!(m.hop > 0) || this.reducedMotion) { m.hop = 0; return 0; }
+        m.hop -= dt;
+        return Math.sin(Math.max(0, m.hop) / 0.32 * Math.PI) * height;
     }
 
     /** Put one instance of a food model in a character's right hand. */

@@ -1,4 +1,5 @@
 import { Entity, SkinnedMesh, StandardMaterial, Animator, quat } from "../engine/index.js";
+import { ToonMaterial } from "./gfx.js";
 
 /**
  * NIGHT MARKET — characters. A person is one skinned mesh (assets/models/person.glb) driven by the
@@ -33,10 +34,13 @@ export const FACES = {
     tired: { mouth: -0.25, brow: -0.4, eyes: 0.38 },
 };
 
+/** Cartoon proportions, applied to the joints every frame: a big head, chunky hands and feet. */
+const CHUNKY = { head: 1.3, handL: 1.4, handR: 1.4, footL: 1.25, footR: 1.25 };
+
 let sharedMaterial = null;
 /** One material (so one shader program) for every person; each mesh brings its own palette. */
 function personMaterial() {
-    if (!sharedMaterial) sharedMaterial = new StandardMaterial({ palette: new Float32Array(StandardMaterial.PALETTE_SIZE * 3).fill(1) });
+    if (!sharedMaterial) sharedMaterial = new ToonMaterial({ palette: new Float32Array(StandardMaterial.PALETTE_SIZE * 3).fill(1), edge: 0.4 });
     return sharedMaterial;
 }
 
@@ -63,6 +67,7 @@ export class Character {
         const sk = assets.person.skeleton;
         this.handR = sk.index("handR");
         this.head = sk.index("head");
+        this.chunky = Object.entries(CHUNKY).map(([name, k]) => [sk.index(name) * 10 + 7, k]).filter(([o]) => o >= 7);
         this.joints = { eyes: sk.index("eyes"), browL: sk.index("browL"), browR: sk.index("browR"), mouth: sk.index("mouth") };
         /** the expression being shown (eased toward `faceGoal`) */
         this.face = { ...FACES.neutral };
@@ -107,6 +112,7 @@ export class Character {
             const x = a.pose[o], y = a.pose[o + 1], z = a.pose[o + 2], w = a.pose[o + 3];
             a.pose[o] = x * c - z * s; a.pose[o + 1] = y * c + w * s; a.pose[o + 2] = z * c + x * s; a.pose[o + 3] = w * c - y * s;
         }
+        for (const [o, k] of this.chunky) { a.pose[o] = k; a.pose[o + 1] = k; a.pose[o + 2] = k; }
         this._poseFace(dt);
         a.solve();
     }

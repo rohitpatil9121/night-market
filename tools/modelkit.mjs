@@ -212,10 +212,20 @@ export class Builder {
             normals = P.map((v) => { const t = sums.get(key(v)) || [0, 0, 1], l = Math.hypot(...t) || 1; return t.map((c) => c / l); });
         }
         const base = this.pos.length / 3;
+        // painted-in shading: every shape is a little darker toward its foot, and everything darkens near
+        // the ground, as if light had trouble getting down there. Palette entries and self-lit parts are left alone.
+        let zMin = Infinity, zMax = -Infinity;
+        for (const v of pts) { if (v[2] < zMin) zMin = v[2]; if (v[2] > zMax) zMax = v[2]; }
+        const tall = zMax - zMin;
         pts.forEach((v, i) => {
             this.pos.push(...v); this.nrm.push(...normals[i]);
             const c = typeof o.color === "function" ? o.color(v, i) : o.color || [1, 1, 1];
-            this.col.push(c[0], c[1], c[2], c[3] ?? 1);
+            let k = 1;
+            if (!c.pal && (c[3] ?? 1) <= 1 && o.shade !== false) {
+                const t = tall > 0.06 ? (v[2] - zMin) / tall : 1;
+                k = (0.82 + 0.18 * t * (2 - t)) * Math.min(1, 0.84 + 0.4 * Math.max(0, v[2]));
+            }
+            this.col.push(c[0] * k, c[1] * k, c[2] * k, c[3] ?? 1);
             const w = o.skin === undefined ? [[0, 1]] : typeof o.skin === "number" ? [[o.skin, 1]] : o.skin(v);
             if (o.skin !== undefined) this.skinned = true;
             const total = w.reduce((n, x) => n + x[1], 0) || 1;
@@ -237,7 +247,7 @@ function faceNormal(a, b, c, unit = true) {
 }
 
 /** Vertex colour meaning "palette entry i" (see StandardMaterial's palette option). */
-export const pal = (i) => [i, 0, 0, 1];
+export const pal = (i) => Object.assign([i, 0, 0, 1], { pal: true });
 
 // ------------------------------------------------------------------ skeleton + animation
 

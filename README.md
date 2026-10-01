@@ -224,3 +224,12 @@ npm run balance
 - Engine: [Projection Lab](https://github.com/rohitpatil9121/projection_library), built on
   [projection_library](https://github.com/rohit-s-init/projection_library) by Rohit Sawant
 - Third-party code and fonts: see [THIRD_PARTY.md](THIRD_PARTY.md)
+
+## The cartoon look
+
+`ToonMaterial` (in `game/gfx.js`) keeps the engine's StandardMaterial vertex shader, so skinning, instancing
+and palettes still work, and swaps the fragment shader: sunlight falls in two tones, colours are pushed a
+little richer, and surfaces darken where they turn away from the camera, which reads as an outline without
+drawing anything twice. The models carry painted-in shading (each shape darker toward its foot and near the
+ground), baked into vertex colours by `tools/modelkit.mjs`. People get their big heads and chunky hands by
+scaling joints after each animation sample.
