@@ -349,7 +349,7 @@ export function extendStreet(s) {
 
 // ------------------------------------------------------------------ the night
 const emit = (s, e) => { s.events.push(e); };
-const moment = (s, good, weight, text) => { s.stats.moments.push({ good, weight, text, t: s.t }); };
+const moment = (s, good, weight, text) => { const m = s.stats.moments; if (weight > 1 || m.length < 40) m.push({ good, weight, text, t: s.t }); };
 function addRep(s, d) { const st = s.stats; if (d > 0) st.repGain += d; else st.repLoss += d; }
 const vendorOfStall = (s, stall) => (stall.vendorId != null ? vendorById(s, stall.vendorId) : null);
 
@@ -788,7 +788,8 @@ function nextNight(s) {
     for (const m of s.mods) { if (m.fresh) m.fresh = false; else m.n--; }
     s.mods = s.mods.filter((m) => m.n > 0);
     for (const v of s.vendors) { v.energy = 100; v.tiredFlag = false; }
-    s.event = null; s.customers = []; s.events = []; s.t = 0;
+    // last night's working data is no longer needed, and dropping it keeps the saved campaign small
+    s.event = null; s.customers = []; s.events = []; s.arrivals = []; s.stats = null; s.t = 0;
     refreshMarket(s);
 }
 
