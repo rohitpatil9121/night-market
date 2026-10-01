@@ -3,7 +3,9 @@
  *
  *   npm run models
  *
- * The models are generated from code (tools/modelkit.mjs), so there are no third-party art assets.
+ * The structures and the people are generated from code (tools/modelkit.mjs). The food, the cookware and a
+ * few props come from two CC0 asset packs by Kenney (assets/packs, read by tools/kenney.mjs) and are baked
+ * into the same files, so the game still loads nothing but what this script writes.
  * Authoring space: Z-up, +Y forward, 1 unit ≈ 1 metre. Stalls face −Y (toward the customers).
  *
  * Colours: characters use palette indices (the game gives each person their own skin, shirt, hair…);
@@ -12,6 +14,10 @@
  */
 import { fileURLToPath } from "node:url";
 import { Builder, lathe, loft, sphere, cylinder, box, roundedBox, torus, keep, pal, skeleton, clip, writeGLB } from "./modelkit.mjs";
+import { packShape } from "./kenney.mjs";
+
+/** Put a model from an asset pack into a builder. `at` is where its base centre goes. */
+const kit = (b, name, at, scale = 1, rot = [0, 0, 0], pack = "food-kit") => { const s = packShape(pack, name); b.add(s, { at, scale, rot, color: s.color }); return b; };
 
 const OUT = fileURLToPath(new URL("../assets/models/", import.meta.url));
 const report = [];
@@ -208,31 +214,18 @@ const COUNTER = {
     skewers(b) {
         b.add(roundedBox(1.5, 0.52, 0.16, 0.04), { at: [0, 2.25, 1.11], color: [0.16, 0.16, 0.18] });
         b.add(box(1.34, 0.36, 0.03), { at: [0, 2.25, 1.195], color: glow([2.6, 0.75, 0.12]) });
-        for (let k = 0; k < 6; k++) {
-            const x = -0.55 + k * 0.22;
-            b.add(cylinder(0.012, 0.012, 0.66, 6), { at: [x, 1.92, 1.235], rot: [-PI / 2, 0, 0], color: [0.85, 0.72, 0.5] });
-            for (let m = 0; m < 3; m++) b.add(roundedBox(0.085, 0.095, 0.075, 0.025), { at: [x, 2.1 + m * 0.14, 1.235], color: m === 1 ? [0.45, 0.68, 0.2] : [0.74, 0.3, 0.14] });
-        }
-        b.add(lathe([[0, 0], [0.2, 0.01], [0.24, 0.05], [0, 0.05]], 14), { at: [0.98, 2.25, 1.03], color: [0.95, 0.95, 0.95] });
+        for (let k = 0; k < 6; k++) kit(b, k % 2 ? "skewer-vegetables" : "skewer", [-0.55 + k * 0.22, 2.25, 1.19], 0.95, [0, 0, PI / 2]);
+        kit(b, "plate", [0.98, 2.25, 1.03], 0.8);
+        kit(b, "skewer", [0.98, 2.25, 1.05], 0.7, [0, 0, 0.5]);
     },
     dumplings(b) {
-        for (const [x, n] of [[-0.62, 3], [0.1, 2], [0.78, 1]]) {
-            for (let m = 0; m < n; m++) {
-                b.add(cylinder(0.27, 0.27, 0.13, 16), { at: [x, 2.25, 1.03 + m * 0.14], color: [0.86, 0.72, 0.46] });
-                b.add(torus(0.272, 0.016, 16, 6), { at: [x, 2.25, 1.03 + m * 0.14 + 0.065], color: [0.6, 0.44, 0.24] });
-            }
-            b.add(lathe([[0.27, 0], [0.22, 0.05], [0.05, 0.085], [0.045, 0.12], [0, 0.125]], 16), { at: [x, 2.25, 1.03 + n * 0.14], color: [0.92, 0.8, 0.55] });
-        }
+        kit(b, "steamer", [-0.68, 2.25, 1.03], 0.95);
+        kit(b, "steamer", [0.02, 2.25, 1.03], 0.75, [0, 0, 0.4]);
+        kit(b, "dim-sum", [0.72, 2.25, 1.03], 1.7);
     },
     noodles(b) {
-        b.add(lathe([[0, 0], [0.22, 0], [0.3, 0.12], [0.32, 0.42], [0.34, 0.44], [0.3, 0.44]], 18), { at: [-0.7, 2.28, 1.03], color: [0.22, 0.23, 0.27] });
-        b.add(cylinder(0.3, 0.3, 0.01, 18), { at: [-0.7, 2.28, 1.42], color: [1.5, 1.15, 0.5, 1.35] });
-        b.add(cylinder(0.012, 0.012, 0.5, 6), { at: [-0.62, 2.2, 1.42], rot: [0.5, 0.3, 0], color: METAL });
-        for (const x of [0.12, 0.56, 1.0]) {
-            b.add(lathe([[0, 0], [0.08, 0], [0.16, 0.1], [0.165, 0.115], [0.14, 0.115]], 14), { at: [x, 2.2, 1.03], color: [0.96, 0.96, 0.98] });
-            b.add(cylinder(0.14, 0.14, 0.01, 14), { at: [x, 2.2, 1.125], color: [0.98, 0.84, 0.36] });
-            b.add(sphere(0.035, 6, 4), { at: [x + 0.04, 2.22, 1.14], color: [0.3, 0.7, 0.25] });
-        }
+        kit(b, "pot-stew", [-0.7, 2.28, 1.03], 1.05);
+        for (const [k, x] of [0.12, 0.56, 1.0].entries()) kit(b, k === 1 ? "bowl-soup" : "bowl-broth", [x, 2.2, 1.03], 0.55, [0, 0, k * 2.1]);
     },
     takoyaki(b) {
         // a cast-iron pan of dumpling balls over a strip of flame, and a stack of paper boats
@@ -240,22 +233,20 @@ const COUNTER = {
         b.add(box(1.4, 0.02, 0.05), { at: [-0.3, 1.965, 1.06], color: glow([2.6, 0.9, 0.2]) });
         for (let r = 0; r < 3; r++) for (let k = 0; k < 7; k++)
             b.add(sphere(0.07, 8, 6), { at: [-0.9 + k * 0.2, 2.09 + r * 0.16, 1.165], color: (k + r) % 4 === 0 ? [0.9, 0.72, 0.4] : [0.78, 0.5, 0.22] });
-        for (let m = 0; m < 4; m++) b.add(roundedBox(0.34, 0.2, 0.035, 0.012), { at: [0.85, 2.25, 1.05 + m * 0.04], color: [0.93, 0.87, 0.74] });
-        b.add(lathe([[0, 0], [0.06, 0], [0.07, 0.2], [0.03, 0.24], [0.03, 0.3], [0, 0.3]], 10), { at: [0.5, 2.42, 1.03], color: [0.45, 0.25, 0.12] });
+        kit(b, "styrofoam", [0.88, 2.2, 1.03], 0.62, [0, 0, PI / 2]);
+        kit(b, "bottle-ketchup", [0.5, 2.44, 1.03], 0.95);
+        kit(b, "bottle-musterd", [0.66, 2.44, 1.03], 0.95);
     },
     tea(b) {
         b.add(roundedBox(0.52, 0.44, 0.64, 0.06), { at: [-0.78, 2.3, 1.35], color: [0.92, 0.93, 0.96] });
         b.add(box(0.36, 0.02, 0.3), { at: [-0.78, 2.075, 1.42], color: glow([0.6, 1.5, 2.4]) });
-        [[0.86, 0.62, 0.88], [0.62, 0.88, 0.68], [0.9, 0.76, 0.56], [0.97, 0.66, 0.78]].forEach((c, k) => {
-            const x = -0.12 + k * 0.33;
-            b.add(lathe([[0, 0], [0.065, 0], [0.085, 0.27], [0, 0.27]], 12), { at: [x, 2.2, 1.03], color: c });
-            b.add(lathe([[0.088, 0], [0.088, 0.02], [0.05, 0.05], [0, 0.05]], 12), { at: [x, 2.2, 1.3], color: [0.97, 0.97, 0.98] });
-            b.add(cylinder(0.011, 0.011, 0.2, 6), { at: [x + 0.02, 2.2, 1.3], rot: [0, 0.18, 0], color: [0.95, 0.3, 0.42] });
-        });
+        ["frappe", "soda-glass", "frappe", "cocktail"].forEach((name, k) => kit(b, name, [-0.12 + k * 0.33, 2.2, 1.03], 0.95, [0, 0, k]));
     },
     rival(b) {
         b.add(roundedBox(0.6, 0.45, 0.4, 0.04), { at: [-0.5, 2.25, 1.23], color: [0.3, 0.08, 0.08] });
         b.add(roundedBox(0.5, 0.4, 0.3, 0.04), { at: [0.45, 2.25, 1.18], color: [0.2, 0.2, 0.22] });
+        kit(b, "burger", [-0.05, 2.2, 1.03], 0.9);
+        kit(b, "fries", [0.95, 2.2, 1.03], 0.9);
     },
 };
 
@@ -270,10 +261,7 @@ function stall(type, c) {
     b.add(roundedBox(2.64, 0.1, 1.25, 0.03), { at: [0, 4.38, 0.63], color: WOOD });                                                                // back wall, lower
     b.add(roundedBox(2.64, 0.08, 1.7, 0.03), { at: [0, 4.39, 2.1], color: shade(c, 0.34) });                                                       // back wall, upper
     b.add(roundedBox(2.4, 0.3, 0.06, 0.02), { at: [0, 4.2, 1.5], color: WOOD_LIGHT });                                                             // shelf
-    for (let k = 0; k < 5; k++) {
-        const jar = [[0.9, 0.5, 0.35], [0.5, 0.75, 0.45], [0.95, 0.8, 0.4], [0.55, 0.6, 0.9], [0.85, 0.45, 0.6]][k];
-        b.add(lathe([[0, 0], [0.09, 0], [0.1, 0.16], [0.07, 0.2], [0.07, 0.24], [0, 0.24]], 10), { at: [-0.95 + k * 0.47, 4.2, 1.53], color: jar });
-    }
+    ["honey", "bottle-oil", "peanut-butter", "soy", "can"].forEach((name, k) => kit(b, name, [-0.95 + k * 0.47, 4.2, 1.53], 0.95));
     // awning: striped cloth sloping down toward the front, with a scalloped edge
     const slope = 0.16;
     for (let k = 0; k < 7; k++) {
@@ -367,26 +355,21 @@ function props() {
     }
 
     // what a customer carries away
-    const skewer = new Builder("food_skewers");
-    skewer.add(cylinder(0.008, 0.008, 0.3, 5), { at: [0, 0, -0.1], color: [0.85, 0.72, 0.5] });
-    for (let m = 0; m < 3; m++) skewer.add(roundedBox(0.06, 0.06, 0.055, 0.02), { at: [0, 0, 0.03 + m * 0.07], color: m === 1 ? [0.45, 0.68, 0.2] : [0.74, 0.3, 0.14] });
-    const dumpling = new Builder("food_dumplings");
-    dumpling.add(roundedBox(0.2, 0.16, 0.08, 0.02), { at: [0, 0, 0], color: [0.95, 0.93, 0.88] });
-    for (const x of [-0.05, 0.05]) dumpling.add(sphere(1, 7, 5), { at: [x, 0, 0.05], scale: [0.045, 0.045, 0.035], color: [0.98, 0.94, 0.82] });
-    const bowl = new Builder("food_noodles");
-    bowl.add(lathe([[0, 0], [0.05, 0], [0.11, 0.07], [0.115, 0.08], [0.09, 0.08]], 12), { at: [0, 0, -0.04], color: [0.96, 0.96, 0.98] });
-    bowl.add(cylinder(0.095, 0.095, 0.01, 12), { at: [0, 0, 0.03], color: [0.98, 0.84, 0.36] });
-    const cup = new Builder("food_tea");
-    cup.add(lathe([[0, 0], [0.045, 0], [0.06, 0.19], [0, 0.19]], 10), { at: [0, 0, -0.09], color: [0.82, 0.62, 0.86] });
-    cup.add(cylinder(0.008, 0.008, 0.14, 5), { at: [0.012, 0, 0.1], color: [0.95, 0.3, 0.42] });
+    const skewer = kit(new Builder("food_skewers"), "skewer", [0, 0, 0.08], 0.62, [0, PI / 2, 0]);
+    const dumpling = kit(new Builder("food_dumplings"), "dim-sum", [0, 0, -0.03], 0.8);
+    const bowl = kit(new Builder("food_noodles"), "bowl-broth", [0, 0, -0.05], 0.4);
+    const cup = kit(new Builder("food_tea"), "frappe", [0, 0, -0.1], 0.75);
     const boat = new Builder("food_takoyaki");
     boat.add(roundedBox(0.22, 0.1, 0.03, 0.01), { at: [0, 0, 0], color: [0.93, 0.87, 0.74] });
     for (const x of [-0.065, 0, 0.065]) boat.add(sphere(0.036, 7, 5), { at: [x, 0, 0.04], color: [0.78, 0.5, 0.22] });
 
+    // market displays that stand by the gates
+    const fruit = kit(new Builder("display_fruit"), "display-fruit", [0, 0, 0], 1.5, [0, 0, 0], "mini-market");
+    const bread = kit(new Builder("display_bread"), "display-bread", [0, 0, 0], 1.5, [0, 0, 0], "mini-market");
     const festoon = new Builder("festoon");     // a paper flag for festival bunting
     festoon.add(box(0.26, 0.012, 0.3), { at: [0, 0, -0.15], color: [1, 1, 1, 1.5] });
 
-    return { meshes: [table, stool, bollard, gate, gateGlow, lantern, planter, crate, barrel, plot, skewer, dumpling, bowl, cup, boat, festoon] };
+    return { meshes: [table, stool, bollard, gate, gateGlow, lantern, planter, crate, barrel, plot, skewer, dumpling, bowl, cup, boat, festoon, fruit, bread] };
 }
 
 // ====================================================================== write

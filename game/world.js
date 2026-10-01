@@ -204,6 +204,7 @@ export class World {
             put(P.geometry("barrel"), gx - out * 1.1, 1.25, 0, 0.4);
             put(P.geometry("crate"), gx - out * 1.75, 1.35, 0, 0.3);
             put(P.geometry("crate"), gx - out * 1.7, 1.3, 0.5, 1.1, 0.8);
+            put(P.geometry(gx === gateL ? "display_fruit" : "display_bread"), gx + out * 1.5, -7.6, 0, gx === gateL ? 0.5 : -0.5);
         }
         const room = Math.max(1, 16 - lights.length - 1), lamps = Math.min(room, Math.max(2, Math.round(span / 7.5)));
         for (let i = 0; i < lamps; i++) {

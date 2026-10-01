@@ -59,7 +59,7 @@
             const a = assets.stalls[type];
             for (const part of ["body", "level2", "level3"]) put(a.geometry(part), -8.75 + i * 3.5, 0);
         });
-        ["table", "stool", "bollard", "planter", "crate", "barrel", "lantern", "festoon", "food_skewers", "food_dumplings", "food_noodles", "food_takoyaki", "food_tea"].forEach((name, i) => put(assets.props.geometry(name), -7 + i * 1.5, -6, name.startsWith("food") || name === "lantern" || name === "festoon" ? 1 : 0));
+        ["table", "stool", "bollard", "planter", "crate", "barrel", "lantern", "festoon", "display_fruit", "display_bread", "food_skewers", "food_dumplings", "food_noodles", "food_takoyaki", "food_tea"].forEach((name, i) => put(assets.props.geometry(name), -7 + i * 1.5, -6, name.startsWith("food") || name === "lantern" || name === "festoon" ? 1 : 0));
 
         const bar = document.getElementById("bar");
         const play = (name) => { for (const c of people) c.play(name); [...bar.children].forEach((b) => b.setAttribute("aria-pressed", String(b.textContent === name))); };
