@@ -1,5 +1,5 @@
 import { Game, PostFX, Audio } from "../engine/index.js";
-import { NIGHT, STALLS, STALL_TYPES, LEVELS, TRAITS, REGULARS, HINTS, ECON, STREET, VENDOR, MANAGERS, MANAGER_IDS } from "./data.js";
+import { NIGHT, STALLS, STALL_TYPES, LEVELS, MAX_LEVEL, TRAITS, REGULARS, HINTS, ECON, STREET, VENDOR, MANAGERS, MANAGER_IDS } from "./data.js";
 import * as sim from "./sim.js";
 import { describeEvent, resolveEvent } from "./events.js";
 import { BOTS, playNight } from "./bots.js";
@@ -7,6 +7,7 @@ import { World } from "./world.js";
 import { loadAssets } from "./assets.js";
 import { SKIN, SHIRT, HAIR, css } from "./characters.js";
 import { icon } from "./icons.js";
+import { loadSignIcons } from "./gfx.js";
 
 /**
  * NIGHT MARKET — application: screens, input, camera, labels, saving.
@@ -30,7 +31,9 @@ const save = (() => {
         return { ...base, ...s, settings: { ...base.settings, ...(s.settings || {}) } };
     } catch (e) { return base; }
 })();
-if (save.campaign && save.campaign.v !== 1) save.campaign = null;
+if (save.campaign && save.campaign.v !== 1 && save.campaign.v !== 2) save.campaign = null;
+// the tutorial runs once, on a first street; anyone who has already played has no use for it
+if (!save.tutorial) save.tutorial = { done: !!(save.best || (save.campaign && save.campaign.night > 1)), ack: {} };
 if (save.campaign) sim.upgradeState(save.campaign);
 /** when the game was last open, for the night manager's earnings while away */
 let lastSeen = save.lastSeen || 0;
@@ -53,7 +56,8 @@ camera.fov = 24;
 camera.far = 320;
 
 // the models are fetched before anything is shown; the page stays veiled until they are in
-const world = new World(game, await loadAssets());
+const [assets] = await Promise.all([loadAssets(), loadSignIcons()]);
+const world = new World(game, assets);
 const audio = new Audio({ volume: 0.9, sfx: save.settings.sfx, music: save.settings.music });
 // ZzFX parameter arrays: volume, randomness, frequency, attack, sustain, release, shape, shapeCurve, slide,
 // deltaSlide, pitchJump, pitchJumpTime, repeatTime, noise, modulation, bitCrush, delay, sustainVolume, decay
@@ -342,6 +346,13 @@ function updateHud(dt, force = false) {
     $("hudCash").parentElement.classList.toggle("low", cash < S.rent);
     setText($("hudRep"), String(Math.round(S.rep)));
     setText($("hudRent"), money(S.rent));
+    const wx = $("hudWeather");
+    if (wx._w !== S.weather) {
+        wx._w = S.weather;
+        wx.innerHTML = S.weather === "rain" ? icon("rain", 20) : S.weather === "festival" ? icon("festival", 20) : "";
+        wx.title = S.weather === "rain" ? "Rain tonight" : S.weather === "festival" ? "Lantern festival tonight" : "";
+        wx.classList.toggle("hidden", S.weather === "clear" || !S.weather);
+    }
     if (live) {
         const st = S.stats;
         setText($("nbServed"), String(st.served));
@@ -368,7 +379,12 @@ function hintText(S) {
     if (!hired.length) return HINTS.noVendor;
     if (S.stalls.some((t) => !sim.worker(S, t))) return HINTS.unstaffed;
     const notes = [];
+    if (S.night === STALLS.takoyaki.unlock && !S.stalls.some((t) => t.type === "takoyaki")) notes.push("Takoyaki is the new craze: from tonight some customers crave it, and the stall is on sale.");
+    if (S.weather === "rain") notes.push(S.flags.awnings ? "Rain tonight. Your awnings keep the crowd coming, and wet people want noodles." : "Rain tonight: a quarter fewer customers, and the ones who come want noodles.");
+    if (S.weather === "festival") notes.push("The lantern festival is tonight. Expect a crowd.");
+    if (S.flags.tourNightly || (S.night >= 6 && S.night % 2 === 0)) notes.push("Mrs. Park's tour comes through tonight: seven people at once. Leave room in the queues.");
     if (S.night % 3 === 0) notes.push("The landlord visits tonight. Don't keep him waiting.");
+    if ((S.night + 1) % 10 === 0) notes.push("Tomorrow night is the lantern festival.");
     for (const m of S.mods) if (m.label) notes.push(`${m.label}: ${m.n} night${m.n === 1 ? "" : "s"} left.`);
     for (const a of S.stalls) {
         const b = sim.stallAt(S, a.slot + 1), va = sim.worker(S, a), vb = b && sim.worker(S, b);
@@ -396,10 +412,10 @@ function renderPanel() {
         const full = S.stalls.length >= S.slots;
         html += `<div class="group"><small>${app.slotFirst != null ? "PUT IN SPOT " + (app.slotFirst + 1) : "BUY A STALL"}</small><div class="rowed">`;
         for (const type of STALL_TYPES) {
-            const d = STALLS[type], cant = S.cash < d.buy || full;
-            html += `<button class="tile${cant ? " cant" : ""}" data-buy="${type}" aria-label="Buy ${d.name} stall for $${d.buy}. ${d.blurb}">
-                <span class="head"><span><span class="ico">${icon(type, 26)}</span> ${d.name}</span><span class="price">${icon("coin", 14)}${d.buy}</span></span>
-                <p>${d.blurb}</p><span class="nums">$${d.price} a plate · ${d.serve.toFixed(1)}s · queue ${d.queue}</span></button>`;
+            const d = STALLS[type], locked = !sim.unlocked(S, type), cant = S.cash < d.buy || full || locked;
+            html += `<button class="tile${cant ? " cant" : ""}" data-buy="${type}" aria-label="${locked ? `${d.name} stall, on sale from night ${d.unlock}` : `Buy ${d.name} stall for $${d.buy}`}. ${d.blurb}">
+                <span class="head"><span><span class="ico">${icon(type, 26)}</span> ${d.name}</span><span class="price">${locked ? icon("lock", 15) : icon("coin", 14) + d.buy}</span></span>
+                <p>${d.blurb}</p><span class="nums">${locked ? "on sale from night " + d.unlock : `$${d.price} a plate · ${d.serve.toFixed(1)}s · queue ${d.queue}`}</span></button>`;
         }
         html += `</div></div>`;
         if (S.stalls.length) {
@@ -408,7 +424,7 @@ function renderPanel() {
                 const v = sim.worker(S, stall), d = STALLS[stall.type], sel = app.sel?.type === "stall" && app.sel.id === stall.id;
                 html += `<button class="tile${sel ? " sel" : ""}" style="width:132px" data-stall="${stall.id}">
                     <span class="head"><span><span class="ico">${icon(stall.type, 26)}</span> Spot ${stall.slot + 1}</span></span>
-                    <p>${d.name}${stall.level > 1 ? " · level " + stall.level : ""}</p><p>${v ? esc(v.name) : "<b style='color:var(--danger)'>No vendor</b>"}</p>
+                    <p>${d.name} · level ${stall.level}</p><p>${v ? esc(v.name) : "<b style='color:var(--danger)'>No vendor</b>"}</p>
                     <span class="nums">$${stall.price} a plate</span></button>`;
             }
             html += `</div></div>`;
@@ -445,8 +461,11 @@ function renderPanel() {
         html += `<button class="tile${!canExtend || S.cash < cost ? " cant" : ""}" data-act="extend" ${canExtend ? "" : "disabled"}>
             <span class="head"><span><span class="ico">🚧</span> Longer street</span><span class="price">${canExtend ? "$" + cost : "max"}</span></span>
             <p>${canExtend ? "Two more spots for stalls." + (S.flags.extendDiscount ? " Half price, courtesy of the landlord." : "") : "The street is as long as it gets."}</p><span class="nums">${S.slots} of ${STREET.maxSlots} spots</span></button>`;
+        const expect = sim.expectation(S) * 4;
         html += `<div class="info"><div><b>About ${sim.arrivalsFor(S)} customers</b> expected tonight.</div><div>Reputation <b>${Math.round(S.rep)}</b> of 100. Good reviews raise it.</div>
-            <div>Rent tonight <b>${money(S.rent)}</b>${S.rentFreeze > 0 ? ", frozen" : `, then +$${S.rentStep} a night`}.</div>${S.rivalStall ? `<div class="mod">Finch's stall is taking 14% of your customers.</div>` : ""}</div>`;
+            ${expect >= 0.05 ? `<div class="mod">A famous street is held to a higher standard: every plate is marked <b>${expect.toFixed(1)}★</b> harder.</div>` : ""}
+            <div>Rent tonight <b>${money(S.rent)}</b>${S.rentFreeze > 0 ? ", frozen" : `, then +$${S.rentStep + (S.endless ? (S.night + 1 - NIGHT.campaignNights) * ECON.endlessRent : 0)} tomorrow`}.</div>${S.rivalStall ? `<div class="mod">Finch's stall is taking 14% of your customers.</div>` : ""}
+            <div>${S.weather === "rain" ? icon("rain", 15) + " Rain tonight" + (S.flags.awnings ? ", but you have awnings." : ": 25% fewer customers.") : S.weather === "festival" ? icon("festival", 15) + " Lantern festival tonight." : "A clear night."}</div></div>`;
         html += `<div class="info"><div><b>In effect</b></div>${S.mods.filter((m) => m.label).map((m) => `<div class="mod">${esc(m.label)} · ${m.n} night${m.n === 1 ? "" : "s"}</div>`).join("") || "<div>Nothing unusual.</div>"}
             ${S.policy.student ? `<div>Bao: ${S.policy.student === "free" ? "eats free" : S.policy.student === "discount" ? "$3 special" : "turned away"}</div>` : ""}</div>`;
         html += `<div class="info"><div><b>Who knows whom</b></div>${known.map((k) => `<div>${k}</div>`).join("") || "<div>No known history in your team yet.</div>"}</div>`;
@@ -467,6 +486,7 @@ function refresh() {
     renderCard();
     updateHud(0, true);
     persist();
+    updateCoach();
 }
 
 function act(result, sound = "place", message) {
@@ -539,8 +559,8 @@ function customerDoing(S, c) {
     const stall = c.stallId != null ? sim.stallById(S, c.stallId) : null, name = stall ? STALLS[stall.type].name : "";
     if (c.state === "queue") return `Queueing for ${name}, place ${stall.queue.indexOf(c.id) + 1} of ${stall.queue.length}`;
     if (c.state === "served") return `Being served by ${sim.worker(S, stall)?.name || "the vendor"}`;
-    if (c.state === "eat") return c.holding === "tea" ? "Drinking bubble tea" : "Eating";
-    if (c.state === "linger") return c.kind === "rival" ? `Watching ${sim.vendorById(S, c.scout)?.name || "your vendor"} work` : c.kind === "kid" ? "Stopped so Biscuit can sniff around" : "Looking around";
+    if (c.state === "eat") return (c.holding === "tea" ? "Drinking bubble tea" : "Eating") + (c.seat >= 0 ? " at a table" : ", standing: the tables are full");
+    if (c.state === "linger") return c.kind === "inspector" ? "Watching a stall, clipboard out" : c.kind === "rival" ? `Watching ${sim.vendorById(S, c.scout)?.name || "your vendor"} work` : c.kind === "kid" ? "Stopped so Biscuit can sniff around" : "Looking around";
     if (c.then === "queue") return `Heading for the ${name} queue`;
     if (c.then === "eat") return "Looking for somewhere to eat";
     if (c.then === "linger") return "Having a look around";
@@ -561,7 +581,8 @@ function renderCard() {
         const stall = sim.stallById(S, sel.id);
         if (!stall) return select(null);
         const d = STALLS[stall.type], v = stall.vendorId != null ? sim.vendorById(S, stall.vendorId) : null, range = sim.priceRange(stall.type);
-        html += `<div class="cardHead"><span class="bigIco">${icon(stall.type, 44)}</span><div><h3>${d.name}</h3><p class="sub">Spot ${stall.slot + 1} · Level ${stall.level}, ${LEVELS[stall.level].label.toLowerCase()}</p></div>${closeBtn}</div>`;
+        html += `<div class="cardHead"><span class="bigIco">${icon(stall.type, 44)}</span><div><h3>${d.name}</h3><p class="sub">Spot ${stall.slot + 1} · ${LEVELS[stall.level].label}</p></div>${closeBtn}</div>
+            <div class="levelBar" role="img" aria-label="Level ${stall.level} of ${MAX_LEVEL}"><span>LEVEL ${stall.level}</span><div>${Array.from({ length: MAX_LEVEL }, (_, i) => `<i class="${i < stall.level ? "on" : ""}${i === 3 || i === 7 ? " step" : ""}"></i>`).join("")}</div></div>`;
         if (prep) {
             html += `<label class="fieldLabel" for="pickVendor">WORKED BY</label><select id="pickVendor" class="pick" data-act="staff"><option value="">Nobody</option>`;
             for (const o of sim.hiredVendors(S)) {
@@ -578,9 +599,15 @@ function renderCard() {
             <div class="kv"><span>Tonight</span><b id="cTonight"></b></div>
             <div class="kv"><span>Ingredients · upkeep</span><b>$${d.cost.toFixed(2)} a plate · $${d.upkeep} a night</b></div></div>`;
         if (prep) {
-            const up = sim.upgradeCost(stall), nx = LEVELS[stall.level + 1];
-            html += `<div class="cardActions">${nx ? `<button class="btn small" data-act="upgrade" ${S.cash < up ? "disabled" : ""} title="${Math.round((1 - nx.serve / LEVELS[stall.level].serve) * 100)}% faster, +2 queue places, more appeal">Upgrade $${up}</button>` : ""}
-                <button class="btn small" data-act="move">Move</button><button class="btn small danger" data-act="sell">Sell</button></div>`;
+            const up = sim.upgradeCost(stall), now = LEVELS[stall.level], nx = LEVELS[stall.level + 1];
+            if (nx) {
+                const gains = [`${Math.round((1 - nx.serve / now.serve) * 100)}% faster`, `+${Math.round((nx.appeal / now.appeal - 1) * 100)}% appeal`];
+                if (nx.queue > now.queue) gains.push("+1 queue place");
+                if (nx.tier > now.tier) gains.push("a new look");
+                html += `<button class="upgrade" data-act="upgrade" ${S.cash < up ? "disabled" : ""}><span class="ico">${icon("upgrade", 22)}</span>
+                    <span><b>Upgrade to level ${stall.level + 1}</b><small>${gains.join(" · ")}</small></span><span class="price">${icon("coin", 14)}${up}</span></button>`;
+            } else html += `<p class="blurb">Top level. This stall is as good as it gets.</p>`;
+            html += `<div class="cardActions"><button class="btn small" data-act="move">Move</button><button class="btn small danger" data-act="sell">Sell</button></div>`;
         }
         cardLive.push(() => {
             const info = sim.serveInfo(S, stall), ratio = stall.price / d.price;
@@ -630,8 +657,8 @@ function renderCard() {
         nameTag.textContent = c.name;
         html += `<div class="cardHead">${avatar(c.look, true)}<div><h3>${esc(c.name)}</h3><p class="sub">${reg ? reg.title : "Customer"}</p></div>${closeBtn}</div>
             <div class="bars"><span>Patience</span><div class="bar" id="cPatience"><i></i></div><em id="cPatienceN"></em></div>
-            <div class="kv"><span>Craving</span><b>${icon(c.craving, 16)} ${STALLS[c.craving].name}${c.thirsty ? " · thirsty " + icon("tea", 16) : ""}</b></div>
-            <div class="kv"><span>Money left</span><b id="cBudget"></b></div>
+            ${c.noEat ? "" : `<div class="kv"><span>Craving</span><b>${icon(c.craving, 16)} ${STALLS[c.craving].name}${c.thirsty ? " · thirsty " + icon("tea", 16) : ""}</b></div>
+            <div class="kv"><span>Money left</span><b id="cBudget"></b></div>`}${c.tour ? `<div class="kv"><span>Here with</span><b>Mrs. Park's tour</b></div>` : ""}
             <div class="kv"><span>Right now</span><b id="cDoing" style="font-family:var(--display);font-size:13.5px"></b></div>
             ${reg ? `<p class="blurb">${reg.blurb}</p>` : ""}`;
         void known;
@@ -640,7 +667,7 @@ function renderCard() {
             const el = $("cPatience"), value = clamp((c.patience / c.patienceMax) * 100, 0, 100);
             el.firstChild.style.width = value + "%"; el.className = "bar" + (value < 35 ? " low" : value < 60 ? " mid" : "");
             setText($("cPatienceN"), String(Math.round(value)));
-            setText($("cBudget"), "$" + Math.round(c.budget));
+            if (!c.noEat) setText($("cBudget"), "$" + Math.round(c.budget));
             setText($("cDoing"), customerDoing(S, c));
         });
     }
@@ -657,7 +684,14 @@ $("card").addEventListener("click", (e) => {
     const a = b.dataset.act;
     if (a === "close") { sfx("ui"); select(null); }
     else if (a === "price") { const stall = sim.stallById(S, sel.id); sim.setPrice(S, stall.id, stall.price + Number(b.dataset.d)); sfx("ui"); for (const fn of cardLive) fn(); if (app.mode === "prep") renderPanel(); persist(); }
-    else if (a === "upgrade") { const stall = sim.stallById(S, sel.id); if (act(sim.upgradeStall(S, sel.id), "hire", "Upgraded")) world.celebrate(sim.slotX(stall.slot), 3); }
+    else if (a === "upgrade") {
+        const stall = sim.stallById(S, sel.id), tier = LEVELS[stall.level].tier;
+        if (act(sim.upgradeStall(S, sel.id), "hire")) {
+            // a new tier changes how the stall looks, and gets the big celebration
+            if (LEVELS[stall.level].tier > tier) { world.celebrate(sim.slotX(stall.slot), 3); toast(`${STALLS[stall.type].name}: ${LEVELS[stall.level].label.toLowerCase()}`, "good"); }
+            $("card").querySelector("[data-act=upgrade]")?.focus({ preventScroll: true });
+        }
+    }
     else if (a === "move") { sfx("ui"); app.tab = "stalls"; setPlacing({ kind: "move", stallId: sel.id }); }
     else if (a === "sell") {
         if (b.dataset.armed !== "1") { b.dataset.armed = "1"; b.textContent = "Really sell?"; setTimeout(() => { b.dataset.armed = ""; b.textContent = "Sell"; }, 2500); return; }
@@ -810,6 +844,9 @@ function openNight() {
     }
     const n = S.stats.expected;
     feed(`Night ${S.night} is open. About ${n} customers on their way.`);
+    if (S.weather === "rain") feed(S.flags.awnings ? "It's raining, but the awnings are keeping people dry." : "It's raining. Fewer people are out tonight.", S.flags.awnings ? "" : "bad");
+    if (S.weather === "festival") feed("The lantern festival has begun.", "good");
+    updateCoach();
 }
 
 function enterNight(resumed) {
@@ -901,6 +938,11 @@ function react(S, events) {
             else if (c.kind === "kid") feed("Pip and Biscuit are on the street. Stalls near them get busier.", "good");
             else if (c.kind === "nurse") feed("Imani is on her break. She tips if her vendor still has energy.");
             else if (c.kind === "student") feed(S.policy.student ? "Bao is here for his dinner." : "A student is walking the street, counting coins.");
+            else if (c.kind === "guide") feed("Mrs. Park's tour group is here: seven hungry people at once.", "good");
+            else if (c.kind === "inspector") feed("The health inspector is on the street. Tired hands and botched orders get written down.", "bad");
+        } else if (e.type === "inspect") {
+            pop("c" + e.id, e.fault ? "✍️" : "✔️", "emoji", 2.2);
+            if (e.fault) { pop("v" + e.vendorId, "📋", "emoji", 2.2); feed(`The inspector is writing something down about ${sim.vendorById(S, e.vendorId).name}.`, "bad"); }
         } else if (e.type === "scene") {
             const a = sim.vendorById(S, e.va), b = sim.vendorById(S, e.vb);
             pop("v" + e.va, "💢", "emoji", 2.4); pop("v" + e.vb, "💢", "emoji", 2.4);
@@ -964,6 +1006,7 @@ function showClosing() {
     show("event", false); show("over", false);
     show("closing", true);
     $("closingNext").focus({ preventScroll: true });
+    updateCoach();
 }
 
 function showEvent() {
@@ -1081,10 +1124,16 @@ $("setMusic").addEventListener("input", (e) => { save.settings.music = +e.target
 $("setBloom").addEventListener("change", (e) => { save.settings.bloom = e.target.checked; applySettings(); persist(); });
 $("setShadows").addEventListener("change", (e) => { save.settings.shadows = e.target.checked; applySettings(); persist(); });
 $("setMotion").addEventListener("change", (e) => { save.settings.reducedMotion = e.target.checked; applySettings(); persist(); });
+click("replayTutorial", () => {
+    save.tutorial = { done: false, ack: {}, replay: true };
+    persist();
+    closeSettings();
+    toast("The tutorial will show on a new street.", "good");
+});
 $("resetProgress").addEventListener("click", (e) => {
     const b = e.currentTarget;
     if (b.dataset.armed !== "1") { b.dataset.armed = "1"; b.textContent = "Press again"; setTimeout(() => { b.dataset.armed = ""; b.textContent = "Erase"; }, 2500); return; }
-    save.campaign = null; save.best = null; b.dataset.armed = ""; b.textContent = "Erased";
+    save.campaign = null; save.best = null; save.tutorial = { done: false, ack: {} }; b.dataset.armed = ""; b.textContent = "Erased";
     try { localStorage.setItem(SAVE_KEY, JSON.stringify(save)); } catch (err) { /* storage unavailable */ }
     if (app.mode !== "title") { app.S = null; closeSettings(); setMenu(false); show("pause", false); }
     app.S = null;
@@ -1138,6 +1187,89 @@ game.onUpdate((dt) => {
     }
 });
 
+// ------------------------------------------------------------------ tutorial
+/**
+ * A coach that walks a first-time player through the first night. Each step is worked out from the
+ * state of the game, so doing things in another order (or without being told) just skips ahead.
+ * A step either waits for the player to do something (it points at `target`), or is a note they
+ * dismiss (`next`).
+ * @returns {{ id: string, text: string, target?: string, next?: boolean, last?: boolean } | null}
+ */
+function coachStep() {
+    const S = app.S, t = save.tutorial;
+    if (!S || t.done || app.mode === "title" || app.menu || S.endless) return null;
+    if (S.night > 2 || (S.night === 2 && app.mode !== "prep")) { t.done = true; return null; }
+    const ack = t.ack;
+    if (S.night === 1 && app.mode === "prep") {
+        if (!ack.welcome) return { id: "welcome", next: true, text: "This is your street. You have $400 and ten nights, and rent is due every night. Let's get a stall open." };
+        if (!S.stalls.length) {
+            if (app.placing) return { id: "place", target: ".slotPick .slots", text: "Now pick a spot: tap a glowing tile on the street, or one of these numbers." };
+            if (app.tab !== "stalls") return { id: "tabStalls", target: "#tab-stalls", text: "Stalls are bought here." };
+            return { id: "buy", target: '[data-buy="dumplings"]', text: "Start with a stall. Dumplings are a safe first choice: tap it." };
+        }
+        if (!sim.hiredVendors(S).length) {
+            const v = app.sel?.type === "vendor" ? sim.vendorById(S, app.sel.id) : null;
+            if (v && !v.hired) return { id: "hire", target: '#card [data-act="hire"]', beside: "#card", text: `This is ${v.name}. Traits change how someone works, so read them. Then hire.` };
+            if (app.tab !== "staff") return { id: "tabStaff", target: "#tab-staff", text: "A stall needs someone to run it. Open Staff." };
+            return { id: "pick", target: `.person[data-vendor="${S.market[0]}"]`, text: "These people are looking for work tonight. Tap one to see who they are." };
+        }
+        if (!ack.tips) return { id: "tips", next: true, text: "Tap a stall to change its price or upgrade it. If you can afford a second stall of a different kind, it catches more of the crowd." };
+        return { id: "open", target: "#openBtn", text: "When you're ready, open for the night." };
+    }
+    if (S.night === 1 && app.mode === "night") {
+        if (!ack.watch) return { id: "watch", next: true, text: "Everyone arrives craving one kind of food. Tap anyone, customer or vendor, to see what they want and how they feel." };
+        if (!ack.speed) return { id: "speed", next: true, target: "#speedCtl", text: "In a hurry? Run the night at 2× or 4×, or pause it." };
+    }
+    if (S.night === 1 && app.mode === "closing" && !ack.ledger) return { id: "ledger", next: true, target: "#ledger", text: "Takings, minus ingredients, wages, upkeep and rent. If cash in hand ever drops below zero, the street closes." };
+    if (S.night === 2 && app.mode === "prep" && !ack.people) return { id: "people", next: true, last: true, text: "From here on it is a people puzzle. Friends side by side serve faster; rivals side by side argue. The Street tab lists who knows whom. Good luck." };
+    return null;
+}
+
+let coachId = null;
+function updateCoach() {
+    const el = $("coach"), step = coachStep();
+    const target = step && step.target ? document.querySelector(step.target) : null;
+    for (const old of document.querySelectorAll(".coachTarget")) if (old !== target) old.classList.remove("coachTarget");
+    el.classList.toggle("hidden", !step);
+    if (!step) { coachId = null; return; }
+    if (target) target.classList.add("coachTarget");
+    if (coachId !== step.id) {
+        coachId = step.id;
+        $("coachText").textContent = step.text;
+        show("coachNext", !!step.next);
+        $("coachNext").textContent = step.last ? "Let's go" : "Got it";
+        el.classList.remove("fresh"); void el.offsetWidth; el.classList.add("fresh");
+    }
+    // sit next to what it points at, wherever on screen there is room; otherwise under the top bar
+    const w = el.offsetWidth, h = el.offsetHeight, vw = innerWidth, vh = innerHeight, r = target && target.getBoundingClientRect();
+    let x = (vw - w) / 2, y = 84;
+    if (r && r.width) {
+        x = clamp(r.left + r.width / 2 - w / 2, 10, vw - w - 10);
+        y = r.top - h - 14;
+        if (y < 70) y = Math.min(vh - h - 10, r.bottom + 14);
+        el.style.setProperty("--arrow", clamp(r.left + r.width / 2 - x, 18, w - 18) + "px");
+    }
+    // a step about something inside a panel stands beside the panel, so it never covers what it talks about
+    const box = step.beside && document.querySelector(step.beside)?.getBoundingClientRect();
+    const beside = !!box && box.left - w - 14 > 10;
+    if (beside) { x = box.left - w - 14; y = clamp(r ? r.top + r.height / 2 - h / 2 : box.top, 70, vh - h - 10); }
+    else if (box) y = Math.max(70, box.top - h - 14);
+    el.classList.toggle("below", !!r && !box && y > r.top);
+    el.classList.toggle("free", !r || !r.width || !!box);
+    el.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+}
+$("coachNext").addEventListener("click", () => {
+    const step = coachStep();
+    sfx("ui");
+    if (step) { save.tutorial.ack[step.id] = true; if (step.last) save.tutorial.done = true; }
+    persist();
+    updateCoach();
+});
+$("coachSkip").addEventListener("click", () => { sfx("ui"); save.tutorial.done = true; persist(); updateCoach(); });
+// the screen changes for many reasons (panels re-render, the window resizes), so the coach just re-checks
+setInterval(updateCoach, 300);
+addEventListener("resize", updateCoach);
+
 // ------------------------------------------------------------------ keeping the frame rate up
 /**
  * If the GPU can't keep up, give up the most expensive effects one at a time, cheapest loss first.
@@ -1189,4 +1321,4 @@ game.start();
 $("fade").classList.remove("on");
 
 // testing / console hook
-window.market = { app, game, world, sim, save, view, goal, quality, BOTS, playNight, startCampaign, openNight, setSpeed, select, goTitle };
+window.market = { app, game, world, sim, save, view, goal, quality, updateCoach, BOTS, playNight, startCampaign, openNight, setSpeed, select, goTitle };

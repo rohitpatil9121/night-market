@@ -29,6 +29,10 @@ export const STREET = Object.freeze({
     queueGap: 0.6,
     laneY: [-4.7, -3.3],
     eatY: [-7.0, -5.6],
+    /** low tables in the eating area: x of the first, the gap between them, y (alternate ones sit 0.5 further up) */
+    tableX0: -0.3, tableGap: 3.3, tableY: -6.2,
+    /** stools around each table, and how far they stand from its centre */
+    seats: 3, seatR: 0.95,
     /** how far beyond the last slot customers appear */
     margin: 6,
 });
@@ -47,11 +51,30 @@ export const ECON = Object.freeze({
     repAngry: -0.7,
     repWalked: -0.06,
     repDecay: 0.5,
+    /**
+     * A famous street is held to a higher standard: above this reputation, every point takes this much
+     * off each plate's satisfaction (0..1). At 90 that is about one star.
+     */
+    expectFrom: 50, expectPer: 0.007,
+    /** in endless mode the rent step itself grows by this much every night */
+    endlessRent: 4,
+});
+
+/**
+ * Weather. Rain keeps people at home (unless you own awnings) and makes them want soup.
+ * Every tenth night is the lantern festival, which brings a crowd.
+ */
+export const WEATHER = Object.freeze({
+    /** unannounced rain: from this night on, with this chance */
+    from: 4, chance: 0.16,
+    rainArrivals: 0.75, rainNoodles: 0.3,
+    festivalEvery: 10, festivalArrivals: 1.12,
 });
 
 /**
  * Stall types. price: default price, cost: ingredients per serve, serve: seconds at skill 3,
  * upkeep: fixed cost per night, sat: base satisfaction 0..1, queue: places in line.
+ * unlock: the first night it can be bought. From that night on, some customers crave it.
  */
 export const STALLS = Object.freeze({
     skewers: {
@@ -66,6 +89,10 @@ export const STALLS = Object.freeze({
         id: "noodles", name: "Noodles", icon: "🍜", buy: 240, price: 14, cost: 4, serve: 9.0, upkeep: 16, sat: 0.86, appeal: 1.1, queue: 5,
         color: [1.0, 0.25, 0.5], blurb: "Slow and expensive. The best reviews on the street.",
     },
+    takoyaki: {
+        id: "takoyaki", name: "Takoyaki", icon: "🍡", buy: 200, price: 11, cost: 3, serve: 7.0, upkeep: 14, sat: 0.78, appeal: 1.05, queue: 6, unlock: 5,
+        color: [0.72, 0.45, 1.0], blurb: "The new craze. From night 5 some people want nothing else.",
+    },
     tea: {
         id: "tea", name: "Bubble Tea", icon: "🧋", buy: 130, price: 6, cost: 1.2, serve: 3.6, upkeep: 8, sat: 0.7, appeal: 0.95, queue: 5, drink: true,
         color: [0.3, 0.75, 1.0], blurb: "A drink. Thirsty customers buy it on top of their meal.",
@@ -74,13 +101,20 @@ export const STALLS = Object.freeze({
 export const STALL_TYPES = Object.freeze(Object.keys(STALLS));
 export const MEAL_TYPES = Object.freeze(STALL_TYPES.filter((t) => !STALLS[t].drink));
 
-/** Upgrade levels 1..3: serve-time multiplier, extra queue places, appeal multiplier, cost as a fraction of buy price. */
-export const LEVELS = Object.freeze([
-    null,
-    { serve: 1, queue: 0, appeal: 1, cost: 0, label: "Basic" },
-    { serve: 0.88, queue: 2, appeal: 1.15, cost: 0.75, label: "Better equipment" },
-    { serve: 0.76, queue: 4, appeal: 1.32, cost: 1.3, label: "Flagship" },
-]);
+/**
+ * Upgrade levels 1..MAX_LEVEL: serve-time multiplier, extra queue places, appeal multiplier, and the cost
+ * of reaching that level as a fraction of the stall's buy price. Each step is small and costs a little
+ * more than the last. tier (1..3) is what the stall looks like: it gains parts at levels 4 and 8.
+ */
+export const MAX_LEVEL = 10;
+const TIER_LABELS = ["", "Basic", "Better equipment", "Flagship"];
+export const LEVELS = Object.freeze([null, ...Array.from({ length: MAX_LEVEL }, (_, i) => {
+    const l = i + 1, tier = l >= 8 ? 3 : l >= 4 ? 2 : 1;
+    return Object.freeze({
+        serve: +(1 - 0.027 * i).toFixed(3), queue: Math.floor((i * 4) / 9), appeal: +(1 + 0.036 * i).toFixed(3),
+        cost: i ? +(0.1 + 0.03 * (i - 1)).toFixed(2) : 0, tier, label: TIER_LABELS[tier],
+    });
+})]);
 
 /** Vendor traits. The numbers are read by sim.js; `text` is what the character card shows. */
 export const TRAITS = Object.freeze({
@@ -124,6 +158,8 @@ export const CUSTOMER = Object.freeze({
     eat: [5, 8], drink: [2.5, 4],
     /** a stall has to score at least this for the customer to bother */
     minScore: 0.5,
+    /** people in a tour group */
+    tourSize: 7,
 });
 
 export const VENDOR_NAMES = Object.freeze([
@@ -135,7 +171,7 @@ export const CUSTOMER_NAMES = Object.freeze([
 ]);
 
 /**
- * The six regulars. `look` indexes the palettes in characters.js; `prop` picks the accessory.
+ * The eight regulars. `look` indexes the palettes in characters.js; `prop` picks the accessory.
  * Their mechanics live in sim.js (spawnRegulars / hooks) and their stories in events.js.
  */
 export const REGULARS = Object.freeze({
@@ -162,6 +198,14 @@ export const REGULARS = Object.freeze({
     kid: {
         id: "kid", name: "Pip", title: "Kid with a dog", prop: "dog", look: { skin: 1, shirt: 5, pants: 1, hair: 2, hairStyle: 1, h: 0.72 },
         blurb: "Pip and Biscuit stop wherever something smells good, and people stop with them. Stalls nearby get busier.",
+    },
+    guide: {
+        id: "guide", name: "Mrs. Park", title: "Tour guide", prop: "flag", look: { skin: 1, shirt: 2, pants: 3, hair: 0, hairStyle: 2, h: 0.94 },
+        blurb: "Walks a tour group through the district from night 6, and seven hungry people arrive right behind her. Feed them and she comes back. Leave them queueing and she tells the next group.",
+    },
+    inspector: {
+        id: "inspector", name: "Inspector Dube", title: "Health inspector", prop: "notebook", look: { skin: 4, shirt: 6, pants: 0, hair: 3, hairStyle: 0, h: 1.03 },
+        blurb: "Doesn't eat. Stands at a few stalls with a clipboard and writes down tired hands, botched orders and arguments.",
     },
 });
 

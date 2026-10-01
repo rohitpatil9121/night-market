@@ -1,5 +1,6 @@
-import { ShaderMaterial, Sky, Texture, projectionChunk, lightingChunk } from "../engine/index.js";
-import { STALLS } from "./data.js";
+import { ShaderMaterial, Sky, Texture, Geometry, Mesh, projectionChunk, lightingChunk } from "../engine/index.js";
+import { STALLS, STALL_TYPES } from "./data.js";
+import { iconImages } from "./icons.js";
 
 /**
  * NIGHT MARKET — the game's own shaders and textures, on top of the engine's light system.
@@ -8,6 +9,7 @@ import { STALLS } from "./data.js";
  *                           receives the sun's shadows and a pool of colour from every stall
  *   createSky()             an evening sky that darkens from sunset to night
  *   signTexture(type)       a stall's sign, drawn on a 2D canvas
+ *   createRain()            falling streaks, animated entirely in the vertex shader
  * @module game/gfx
  */
 
@@ -26,6 +28,7 @@ void main() {
 const groundFragment = /* glsl */ `
 ${lightingChunk}
 uniform vec2 u_street;      // x of the left and right ends of the paved walkway
+uniform float u_wet;        // 0 dry … 1 in the rain: darker stone, and the lights lie on it
 varying vec3 v_world;
 
 float hash21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
@@ -54,16 +57,56 @@ void main() {
     // kerb between walkway and road
     albedo = mix(albedo, vec3(0.82, 0.8, 0.78), (1.0 - smoothstep(0.06, 0.13, abs(p.y + 8.6))) * inStreet);
 
+    albedo *= 1.0 - 0.42 * u_wet;
     vec3 n = vec3(0.0, 0.0, 1.0);
     vec3 lamps = labPoints(v_world, n);
-    // the street is a little damp: coloured light leaves a sheen on the smoother slabs
-    vec3 color = albedo * (labAmbient(n) + labSun(v_world, n) + lamps) + lamps * lamps * (0.03 + 0.05 * tone);
+    // the street is a little damp: coloured light leaves a sheen on the smoother slabs, and a lot more in the rain
+    vec3 color = albedo * (labAmbient(n) + labSun(v_world, n) + lamps) + lamps * lamps * (0.03 + 0.05 * tone) * (1.0 + 4.0 * u_wet) + lamps * 0.07 * u_wet;
     gl_FragColor = vec4(labFog(color, v_world), 1.0);
 }
 `;
 
 export function createGroundMaterial() {
-    return new ShaderMaterial({ name: "market-ground", vertex: groundVertex, fragment: groundFragment, castShadow: false, uniforms: { u_street: new Float32Array([-40, 60]) } });
+    return new ShaderMaterial({ name: "market-ground", vertex: groundVertex, fragment: groundFragment, castShadow: false, uniforms: { u_street: new Float32Array([-40, 60]), u_wet: 0 } });
+}
+
+const rainVertex = /* glsl */ `
+${projectionChunk}
+attribute vec3 a_position;      // xy: where in the area (0..1), z: 0 for the bottom of a streak, 1 for its top
+uniform float u_time;
+uniform vec4 u_area;            // x0, x1, y0, y1 in world units
+uniform float u_rain;           // 0..1
+varying float v_alpha;
+float hash21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+void main() {
+    float ph = hash21(a_position.xy);
+    float height = 15.0;
+    // every streak falls at its own speed and starts at its own height, then wraps to the top
+    float z = height - mod(u_time * (17.0 + ph * 7.0) + ph * 91.0, height);
+    vec3 world = vec3(mix(u_area.x, u_area.y, a_position.x), mix(u_area.z, u_area.w, a_position.y), z);
+    world += a_position.z * vec3(0.14, 0.0, 0.95);
+    v_alpha = (1.0 - a_position.z * 0.8) * u_rain * (0.32 + 0.45 * ph);
+    gl_Position = projectLab(world);
+}
+`;
+const rainFragment = /* glsl */ `
+varying float v_alpha;
+void main() { gl_FragColor = vec4(0.72, 0.8, 1.0, v_alpha); }
+`;
+
+/**
+ * Rain as one draw call: `count` line segments whose fall is computed in the vertex shader, so it costs
+ * the CPU nothing. Set `material.values.u_rain` (0..1) and `u_area` (the patch of ground it covers).
+ */
+export function createRain(count = 2600) {
+    const positions = new Float32Array(count * 6);
+    for (let i = 0; i < count; i++) {
+        const x = Math.random(), y = Math.random();
+        positions.set([x, y, 0, x, y, 1], i * 6);
+    }
+    const material = new ShaderMaterial({ name: "market-rain", vertex: rainVertex, fragment: rainFragment, transparent: true, depthWrite: false, cull: "none", castShadow: false,
+        uniforms: { u_area: new Float32Array([-10, 30, -12, 8]), u_rain: 0 } });
+    return new Mesh(new Geometry({ name: "rain", positions, mode: "lines" }), material);
 }
 
 const skyFragment = /* glsl */ `
@@ -102,8 +145,12 @@ export function createSky() {
 }
 
 const signs = new Map();
-const NAMES = { skewers: "SKEWERS", dumplings: "DUMPLINGS", noodles: "NOODLES", tea: "BUBBLE TEA", rival: "FINCH'S" };
-const ICONS = { skewers: "🍢", dumplings: "🥟", noodles: "🍜", tea: "🧋", rival: "🕶" };
+const NAMES = { skewers: "SKEWERS", dumplings: "DUMPLINGS", noodles: "NOODLES", takoyaki: "TAKOYAKI", tea: "BUBBLE TEA", rival: "FINCH'S" };
+const FALLBACK = { skewers: "🍢", dumplings: "🥟", noodles: "🍜", takoyaki: "🍡", tea: "🧋", rival: "🕶" };
+/** the game's own icons as images; filled by loadSignIcons() */
+let pictures = {};
+/** Fetch the icon drawings the signs use. Call once before the first signTexture(). */
+export async function loadSignIcons() { pictures = await iconImages([...STALL_TYPES, "rival"], 192); }
 const css = (c, k = 1) => `rgb(${Math.round(Math.min(1, c[0] * k) * 255)},${Math.round(Math.min(1, c[1] * k) * 255)},${Math.round(Math.min(1, c[2] * k) * 255)})`;
 
 /** A stall's sign face: its icon and name on the stall's colour. One texture per stall type, made once. */
@@ -118,13 +165,16 @@ export function signTexture(type) {
     g.fillStyle = grad; g.fillRect(0, 0, 512, 160);
     g.strokeStyle = "rgba(255,255,255,0.85)"; g.lineWidth = 8; g.strokeRect(10, 10, 492, 140);
     g.textBaseline = "middle";
-    g.font = "92px serif"; g.textAlign = "left";
-    g.fillText(ICONS[type], 30, 86);
+    // the icon on a pale disc, so it reads on any colour of sign
+    g.fillStyle = "rgba(255,250,235,0.92)";
+    g.beginPath(); g.arc(84, 80, 56, 0, Math.PI * 2); g.fill();
+    if (pictures[type]) g.drawImage(pictures[type], 36, 32, 96, 96);
+    else { g.font = "76px serif"; g.textAlign = "center"; g.fillText(FALLBACK[type], 84, 86); }
     const name = NAMES[type];
     g.font = `800 ${name.length > 8 ? 58 : 68}px "Space Grotesk", system-ui, sans-serif`;
     g.textAlign = "center";
-    g.lineJoin = "round"; g.lineWidth = 10; g.strokeStyle = "rgba(40,10,20,0.55)"; g.strokeText(name, 320, 84);
-    g.fillStyle = "#fffdf2"; g.fillText(name, 320, 84);
+    g.lineJoin = "round"; g.lineWidth = 10; g.strokeStyle = "rgba(40,10,20,0.55)"; g.strokeText(name, 326, 84);
+    g.fillStyle = "#fffdf2"; g.fillText(name, 326, 84);
     const texture = new Texture({ source: canvas, flipY: true, wrap: "clamp", name: "sign-" + type });
     signs.set(type, texture);
     return texture;

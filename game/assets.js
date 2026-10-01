@@ -6,12 +6,12 @@ import { loadGLTF, Geometry } from "../engine/index.js";
  * @module game/assets
  */
 
-const STALL_TYPES = ["skewers", "dumplings", "noodles", "tea", "rival"];
+const STALL_TYPES = ["skewers", "dumplings", "noodles", "takoyaki", "tea", "rival"];
 
 /**
  * Load everything the scene needs. Resolves to:
  *   person, dog   glTF assets with a skeleton and animation clips
- *   stalls        { skewers, dumplings, noodles, tea, rival }: assets with "body", "level2", "level3" meshes
+ *   stalls        { skewers, dumplings, noodles, takoyaki, tea, rival }: assets with "body", "level2", "level3" meshes
  *   props         one asset holding the street furniture and the food people carry
  *   upright       quaternion that stands a loaded model up in the engine's Z-up world
  *   personGeometry(hairStyle, prop)   merged, cached geometry for one combination of hair and accessory

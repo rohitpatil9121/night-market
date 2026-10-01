@@ -190,23 +190,43 @@ export const EVENTS = {
     },
 
     // ------------------------------------------------------------------ the street
+    tour: {
+        priority: 58, repeat: 2, who: "guide", title: (s, c) => (c.good ? "The tour loved it" : "The tour left hungry"),
+        find: (s) => { const t = s.stats.tour; return t && (t.angry >= 3 || (t.happy >= 5 && !s.flags.tourNightly)) ? { good: t.angry < 3, happy: t.happy, angry: t.angry } : null; },
+        text: (s, c) => (c.good
+            ? `Mrs. Park's group of seven came through tonight and ${c.happy} of them left four stars or better. She would like to make your street a fixed stop.`
+            : `Mrs. Park brought seven people down your street tonight and ${c.angry} of them gave up or found nothing. She is deciding what to tell tomorrow's group.`),
+        choices: [
+            { label: "Join her nightly route", show: (s, c) => c.good, detail: () => "The tour comes every night from now on: seven customers at once.", apply: (s) => { s.flags.tourNightly = true; return "Your street is on the laminated map now."; } },
+            { label: "Take a finder's fee instead", show: (s, c) => c.good, detail: () => "+$70.", apply: (s) => { s.cash += 70; return "She pays in an envelope with the tour company's logo on it."; } },
+            { label: "Send apologies and vouchers", cost: 35, show: (s, c) => !c.good, detail: () => "Reputation +3.", apply: (s) => { rep(s, 3); return "Seven vouchers, hand-delivered to the hotel."; } },
+            { label: "Shrug it off", show: (s, c) => !c.good, detail: () => "Reputation −4.", apply: (s) => { rep(s, -4); return "Tomorrow's group hears about it on the bus."; } },
+        ],
+    },
     festival: {
-        priority: 40, title: () => "Lantern festival tomorrow",
-        find: (s) => (s.night === 9 && !s.endless ? {} : null),
+        priority: 40, repeat: 5, title: () => "Lantern festival tomorrow",
+        find: (s) => (s.night % 10 === 9 ? {} : null),
         text: () => "Tomorrow is the lantern festival and the whole district will be out walking. The streets that dress up for it get the crowds.",
         choices: [
-            { label: "Hang lanterns", cost: 40, detail: () => "30% more customers tomorrow. Reputation +2.", apply: (s) => { addMod(s, "arrivals", 1.3, 1, "Lantern festival"); rep(s, 2); return "Two hundred paper lanterns, strung by midnight."; } },
-            { label: "Do nothing special", detail: () => "12% more customers tomorrow.", apply: (s) => { addMod(s, "arrivals", 1.12, 1, "Lantern festival"); return "Some of the crowd will wander through anyway."; } },
+            { label: "Hang lanterns", cost: 40, detail: () => "30% more customers tomorrow instead of 12%. Reputation +2.", apply: (s) => { addMod(s, "arrivals", 1.16, 1, "Your own lanterns"); rep(s, 2); return "Two hundred paper lanterns, strung by midnight."; } },
+            { label: "Do nothing special", detail: () => "12% more customers tomorrow, as on every street.", apply: () => { return "Some of the crowd will wander through anyway."; } },
         ],
     },
     inspector: {
-        priority: 30, jitter: 12, title: () => "Health inspection",
-        find: (s) => (s.night >= 3 && s.stalls.length ? {} : null),
-        text: () => "A note under the shutter: the health inspector is coming in the morning.",
+        priority: 78, repeat: 2, who: "inspector", title: (s, c) => (c.n ? "The inspector's report" : "A clean inspection"),
+        // the report is kept until it has been dealt with, so a busier night's story can't bury it
+        find: (s) => (s.flags.inspection ? { ...s.flags.inspection } : null),
+        text: (s, c) => {
+            if (!c.n) return `Inspector Dube's report is in. He stood at ${c.checked} of your stalls and found nothing to write down, and he has brought the certificate himself.`;
+            const v = c.v != null ? V(s, c.v) : null;
+            return `Inspector Dube's report is in. He watched ${c.checked} of your stalls and wrote up ${c.n === 1 ? "one of them" : c.n + " of them"}${v ? `, starting with ${v.name}: ${c.why}` : ""}. The fine is $${30 * c.n}.`;
+        },
         choices: [
-            { label: "Pay for a deep clean", cost: 50, detail: () => "Reputation +3.", apply: (s) => { rep(s, 3); return "A perfect score, displayed on every stall."; } },
-            { label: "Have the vendors scrub tonight", detail: () => "Every vendor's mood −6.", apply: (s) => { for (const v of hiredVendors(s)) mood(v, -6); return "It passes. Nobody is speaking to you."; } },
-            { label: "Wing it", detail: () => "Even odds: nothing, or a $80 fine and reputation −4.", apply: (s) => { if (chance(s, 0.5)) return "The inspector is in a hurry and signs without looking."; s.cash -= 80; rep(s, -4); return "A grease trap, apparently. Eighty dollars, and a notice on the wall."; } },
+            { label: "Frame the certificate", cost: 20, show: (s, c) => !c.n, detail: () => "All stalls 4% more appealing, for good.", apply: (s) => { s.flags.inspection = null; s.appealBonus += 0.04; return "It hangs where every queue can read it."; } },
+            { label: "Pin it by the gate", show: (s, c) => !c.n, detail: () => "Reputation +3.", apply: (s) => { s.flags.inspection = null; rep(s, 3); return "People do read these things."; } },
+            { label: "Pay the fine", show: (s, c) => c.n > 0, detail: (s, c) => `−$${30 * c.n}.`, apply: (s, c) => { s.flags.inspection = null; s.cash -= 30 * c.n; return "Paid in full, receipt stapled to the report."; } },
+            { label: "Contest it", show: (s, c) => c.n > 0, detail: () => "Even odds: it is dropped, or the fine stands and reputation −4.", apply: (s, c) => { s.flags.inspection = null; if (chance(s, 0.5)) return "He reads your letter twice and withdraws the report."; s.cash -= 30 * c.n; rep(s, -4); return "The fine stands, and now there is a notice on the wall."; } },
+            { label: "Promise retraining", show: (s, c) => c.n > 0, detail: () => "No fine. Every vendor's mood −6.", apply: (s) => { s.flags.inspection = null; for (const v of hiredVendors(s)) mood(v, -6); return "Two hours of hygiene videos after closing. Nobody is speaking to you."; } },
         ],
     },
     supplier: {
@@ -220,12 +240,12 @@ export const EVENTS = {
         ],
     },
     rain: {
-        priority: 26, jitter: 12, title: () => "Rain on the way",
-        find: (s) => (s.night >= 2 && !s.flags.awnings && s.stalls.length ? {} : null),
+        priority: 26, jitter: 12, repeat: 4, title: () => "Rain on the way",
+        find: (s) => (s.night >= 2 && !s.flags.awnings && !s.forecast && s.stalls.length ? {} : null),
         text: () => "The forecast for tomorrow night is heavy rain. Wet streets keep people at home.",
         choices: [
-            { label: "Buy awnings", cost: 45, detail: () => "Rain never costs you customers again.", apply: (s) => { s.flags.awnings = true; return "Striped canvas over the whole walkway. Let it rain."; } },
-            { label: "Risk it", detail: () => "25% fewer customers tomorrow.", apply: (s) => { addMod(s, "arrivals", 0.75, 1, "Rain"); return "You'll find out tomorrow."; } },
+            { label: "Buy awnings", cost: 45, detail: () => "Rain never costs you customers again.", apply: (s) => { s.flags.awnings = true; s.forecast = "rain"; return "Striped canvas over the whole walkway. Let it rain."; } },
+            { label: "Risk it", detail: () => "25% fewer customers tomorrow, and on every wet night after.", apply: (s) => { s.forecast = "rain"; return "You'll find out tomorrow."; } },
         ],
     },
     musician: {
@@ -254,9 +274,9 @@ const ORDER = Object.keys(EVENTS);
  * 2: everyday staff matters. 1: things that just happen on a street.
  */
 const TIER = {
-    student: 3, studentPayoff: 3, critic: 3, landlordAngry: 3, landlordPleased: 3, poach: 3, nurse: 3, kid: 3, quitThreat: 3, festival: 3,
-    rivalFight: 2, exhausted: 2, raise: 2, friendship: 2, mentor: 2,
-    inspector: 1, supplier: 1, rain: 1, musician: 1, wallet: 1,
+    student: 3, studentPayoff: 3, critic: 3, landlordAngry: 3, landlordPleased: 3, poach: 3, nurse: 3, kid: 3, quitThreat: 3, festival: 3, inspector: 3,
+    tour: 2, rivalFight: 2, exhausted: 2, raise: 2, friendship: 2, mentor: 2,
+    supplier: 1, rain: 1, musician: 1, wallet: 1,
 };
 
 /** Choose tonight's event. Called once by the simulation when the night closes. */

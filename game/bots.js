@@ -1,6 +1,6 @@
-import { STALLS, ECON, STREET } from "./data.js";
+import { STALLS, ECON, STREET, MAX_LEVEL } from "./data.js";
 import { buyStall, hire, assign, upgradeStall, extendStreet, moveStall, startNight, stepNight, advance, continueEndless,
-    vendorById, stallAt, hiredVendors, worker, relation, upgradeCost, extendCost } from "./sim.js";
+    vendorById, stallAt, hiredVendors, worker, relation, upgradeCost, extendCost, unlocked } from "./sim.js";
 import { describeEvent, resolveEvent } from "./events.js";
 
 /**
@@ -52,12 +52,13 @@ function arrange(s) {
     }
 }
 
-const MIX = ["dumplings", "skewers", "tea", "noodles", "dumplings", "skewers", "noodles", "tea", "dumplings", "noodles"];
+const MIX = ["dumplings", "skewers", "tea", "noodles", "dumplings", "skewers", "takoyaki", "tea", "takoyaki", "noodles"];
 
 function build(s, plan, { upgrades = true, tidy = true } = {}) {
     staff(s, 0);
     while (s.stalls.length < s.slots) {
-        const type = plan[s.stalls.length % plan.length], def = STALLS[type];
+        // anything not on sale yet is swapped for the all-rounder
+        const want = plan[s.stalls.length % plan.length], type = unlocked(s, want) ? want : "dumplings", def = STALLS[type];
         const needHire = !hiredVendors(s).some((v) => v.stallId == null && !v.off);
         const after = s.cash - def.buy - (needHire ? ECON.hireFee : 0);
         // keep tonight's rent in hand; the night's takings cover wages and upkeep
@@ -67,8 +68,11 @@ function build(s, plan, { upgrades = true, tidy = true } = {}) {
     }
     if (upgrades) {
         if (s.stalls.length >= s.slots && s.slots < STREET.maxSlots && s.cash - extendCost(s) > reserve(s) + 120) extendStreet(s);
-        const busiest = s.stalls.filter((t) => t.level < 3 && worker(s, t)).sort((a, b) => a.level - b.level || a.slot - b.slot)[0];
-        if (busiest && s.stalls.length >= Math.min(4, s.slots) && s.cash - upgradeCost(busiest) > reserve(s) + 80) upgradeStall(s, busiest.id);
+        // a few small upgrades a night, always to whichever stall is furthest behind
+        for (let k = 0; k < 4; k++) {
+            const lowest = s.stalls.filter((t) => t.level < MAX_LEVEL && worker(s, t)).sort((a, b) => a.level - b.level || a.slot - b.slot)[0];
+            if (!lowest || s.stalls.length < Math.min(4, s.slots) || s.cash - upgradeCost(lowest) <= reserve(s) + 80 || !upgradeStall(s, lowest.id).ok) break;
+        }
     }
     if (tidy) arrange(s);
 }

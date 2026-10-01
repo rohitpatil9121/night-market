@@ -1,4 +1,4 @@
-import { NIGHT, STREET, ECON, STALLS, MEAL_TYPES, LEVELS, TRAITS, TRAIT_IDS, VENDOR, CUSTOMER, VENDOR_NAMES, CUSTOMER_NAMES, REGULARS, MANAGERS } from "./data.js";
+import { NIGHT, STREET, ECON, WEATHER, STALLS, MEAL_TYPES, LEVELS, MAX_LEVEL, TRAITS, TRAIT_IDS, VENDOR, CUSTOMER, VENDOR_NAMES, CUSTOMER_NAMES, REGULARS, MANAGERS } from "./data.js";
 import { pickEvent } from "./events.js";
 
 /**
@@ -45,6 +45,20 @@ export const streetEnds = (s) => ({ left: -STREET.margin, right: (s.slots - 1) *
 export function queueSpot(stall, k, out = { x: 0, y: 0 }) {
     out.x = slotX(stall.slot) + (k === 0 ? 0 : k % 2 ? 0.2 : -0.2);
     out.y = STREET.queueY0 - k * STREET.queueGap;
+    return out;
+}
+/** Centres of the low tables in the eating area. The row grows with the street. */
+export function tables(s) {
+    const out = [], right = slotX(s.slots - 1) + 1;
+    for (let x = STREET.tableX0, i = 0; x < right; x += STREET.tableGap, i++) out.push({ x, y: STREET.tableY + (i % 2) * 0.5 });
+    return out;
+}
+export const seatCount = (s) => tables(s).length * STREET.seats;
+/** Where stool k stands (x, y) and the table it faces (tx, ty). */
+export function seatSpot(k, out = { x: 0, y: 0, tx: 0, ty: 0 }) {
+    const t = Math.floor(k / STREET.seats), a = ((k % STREET.seats) / STREET.seats) * Math.PI * 2 + 0.5 + t * 0.7;
+    out.tx = STREET.tableX0 + t * STREET.tableGap; out.ty = STREET.tableY + (t % 2) * 0.5;
+    out.x = out.tx + Math.cos(a) * STREET.seatR; out.y = out.ty + Math.sin(a) * STREET.seatR;
     return out;
 }
 
@@ -97,13 +111,14 @@ function randomLook(s) {
 
 export function createCampaign(seed = 1) {
     const s = {
-        v: 1, seed, rng: Math.imul(seed | 0, 2654435761) | 0,
+        v: 2, seed, rng: Math.imul(seed | 0, 2654435761) | 0,
         night: 1, phase: "prep", endless: false, outcome: null,
         cash: ECON.startCash, rep: ECON.startRep, rent: ECON.rentBase, rentStep: ECON.rentStep, rentFreeze: 0,
         slots: STREET.startSlots, stalls: [], vendors: [], market: [], rel: {}, nextId: 1,
         mods: [], appealBonus: 0, rivalStall: false, policy: { student: null },
         managers: { night: 0, marshal: 0, buyer: 0, promoter: 0 },
         flags: { studentFed: 0, nurseServed: 0 }, eventNight: {},
+        weather: "clear", forecast: null, seats: {},
         t: 0, customers: [], arrivals: [], arrivalIdx: 0, sceneT: 0, kidAt: null, events: [],
         stats: null, summary: null, event: null, history: [],
     };
@@ -127,6 +142,7 @@ export function createCampaign(seed = 1) {
         else if (r < 0.31) s.rel[relKey(s.vendors[i].id, s.vendors[j].id)] = { t: "rival", known };
     }
     s.flags.criticNight = rint(s, 3, 7);
+    s.flags.inspectNight = rint(s, 5, 7);
     refreshMarket(s);
     return s;
 }
@@ -182,12 +198,26 @@ export function collectOffline(s, seconds) {
 /** Bring a campaign saved by an older version up to date. */
 export function upgradeState(s) {
     s.managers = { night: 0, marshal: 0, buyer: 0, promoter: 0, ...(s.managers || {}) };
+    if (s.v === 1) {
+        // stalls had three big levels; the same strength is now levels 1, 5 and 10
+        for (const stall of s.stalls) stall.level = [1, 1, 5, 10][stall.level] || 1;
+        s.v = 2;
+    }
+    s.weather ||= "clear"; s.forecast ||= null; s.seats ||= {};
     return s;
 }
 
 // ------------------------------------------------------------------ derived numbers (also shown in the UI)
 export const queueCap = (stall) => STALLS[stall.type].queue + LEVELS[stall.level].queue;
-export const upgradeCost = (stall) => (stall.level >= 3 ? Infinity : Math.round(STALLS[stall.type].buy * LEVELS[stall.level + 1].cost));
+export const upgradeCost = (stall) => (stall.level >= MAX_LEVEL ? Infinity : Math.round(STALLS[stall.type].buy * LEVELS[stall.level + 1].cost));
+/** Can this stall type be bought yet? */
+export const unlocked = (s, type) => s.night >= (STALLS[type].unlock || 0);
+/** The meals customers can crave tonight. */
+export const cravings = (s) => MEAL_TYPES.filter((t) => unlocked(s, t));
+/** How much each plate's satisfaction (0..1) is marked down because the street is famous. */
+export const expectation = (s) => Math.max(0, s.rep - ECON.expectFrom) * ECON.expectPer;
+/** Share of customers the weather lets through tonight. */
+export const weatherArrivals = (s) => (s.weather === "festival" ? WEATHER.festivalArrivals : s.weather === "rain" && !s.flags.awnings ? WEATHER.rainArrivals : 1);
 export function extendCost(s) {
     const i = (s.slots - STREET.startSlots) / 2;
     if (s.slots >= STREET.maxSlots) return Infinity;
@@ -197,7 +227,7 @@ export const priceRange = (type) => ({ min: Math.max(1, Math.ceil(STALLS[type].p
 /** Customers expected tonight. */
 export function arrivalsFor(s) {
     const a = ECON.arrivals;
-    return Math.round((a.base + s.rep * a.perRep + Math.min(s.night, 14) * a.perNight) * mod(s, "arrivals") * managed(s, "promoter") * (s.rivalStall ? 0.86 : 1));
+    return Math.round((a.base + s.rep * a.perRep + Math.min(s.night, 14) * a.perNight) * mod(s, "arrivals") * managed(s, "promoter") * weatherArrivals(s) * (s.rivalStall ? 0.86 : 1));
 }
 /** Hour and minute on the market clock for the current tick. */
 export function nightClock(s) {
@@ -216,7 +246,7 @@ export function serveInfo(s, stall) {
     add("Skill " + v.skill, VENDOR.skillServe(v.skill));
     if (has(v, "fast")) add(TRAITS.fast.name, TRAITS.fast.serve);
     if (has(v, "perfectionist")) add(TRAITS.perfectionist.name, TRAITS.perfectionist.serve);
-    add(LEVELS[stall.level].label, LEVELS[stall.level].serve);
+    add("Level " + stall.level, LEVELS[stall.level].serve);
     if (v.energy < 50) add("Tired", 1 + ((50 - v.energy) / 50) * VENDOR.tiredSlow);
     for (const n of neighbours(s, stall)) {
         const r = relation(s, v.id, n.vendor.id);
@@ -287,6 +317,7 @@ export function buyStall(s, type, slot) {
     const def = STALLS[type];
     if (!inPrep(s)) return fail("The market is open");
     if (!def) return fail("Unknown stall");
+    if (!unlocked(s, type)) return fail(`${def.name} arrives on night ${def.unlock}`);
     if (slot < 0 || slot >= s.slots) return fail("Not on your street");
     if (stallAt(s, slot)) return fail("That spot is taken");
     if (s.cash < def.buy) return fail(`You need $${def.buy}`);
@@ -325,7 +356,7 @@ export function moveStall(s, stallId, slot) {
 export function upgradeStall(s, stallId) {
     const stall = stallById(s, stallId);
     if (!inPrep(s) || !stall) return fail("Can't upgrade that now");
-    if (stall.level >= 3) return fail("Already a flagship");
+    if (stall.level >= MAX_LEVEL) return fail("Already at the top level");
     const cost = upgradeCost(stall);
     if (s.cash < cost) return fail(`You need $${cost}`);
     s.cash -= cost;
@@ -399,11 +430,11 @@ const vendorOfStall = (s, stall) => (stall.vendorId != null ? vendorById(s, stal
 
 export function startNight(s) {
     if (!inPrep(s)) return fail("Already open");
-    s.phase = "night"; s.t = 0; s.customers = []; s.events = []; s.sceneT = 0; s.arrivalIdx = 0; s.kidAt = null; s.summary = null; s.event = null;
+    s.phase = "night"; s.t = 0; s.customers = []; s.events = []; s.sceneT = 0; s.arrivalIdx = 0; s.kidAt = null; s.summary = null; s.event = null; s.seats = {};
     const st = (s.stats = {
         served: 0, angry: 0, walked: 0, revenue: 0, tips: 0, ingredients: 0, stars: 0, reviews: 0, repGain: 0, repLoss: 0,
         mistakes: 0, scenes: [], moments: [], perStall: {}, perVendor: {}, levelUps: [], discovered: [],
-        critic: null, criticVendor: null, landlord: null, studentSeen: false, nurse: false, kid: false, expected: 0,
+        critic: null, criticVendor: null, landlord: null, studentSeen: false, nurse: false, kid: false, expected: 0, tour: null, inspector: null,
     });
     for (const stall of s.stalls) {
         stall.queue = []; stall.serving = null; stall.serveT = 0; stall.pauseT = 0; stall.mistake = false;
@@ -427,7 +458,9 @@ export function startNight(s) {
 function makeCustomerSpec(s) {
     const c = CUSTOMER;
     return {
-        kind: "n", name: pick(s, CUSTOMER_NAMES), look: randomLook(s), craving: pick(s, MEAL_TYPES), thirsty: chance(s, c.thirsty),
+        kind: "n", name: pick(s, CUSTOMER_NAMES), look: randomLook(s), thirsty: chance(s, c.thirsty),
+        // a wet night is soup weather
+        craving: s.weather === "rain" && chance(s, WEATHER.rainNoodles) ? "noodles" : pick(s, cravings(s)),
         budget: rint(s, c.budget[0], c.budget[1]), patience: rrange(s, c.patience[0], c.patience[1]), speed: rrange(s, c.speed[0], c.speed[1]),
         side: chance(s, 0.5) ? 1 : 0,
     };
@@ -435,7 +468,7 @@ function makeCustomerSpec(s) {
 
 function regularSpec(s, id, extra) {
     const r = REGULARS[id];
-    return { kind: id, name: r.name, look: r.look, craving: pick(s, MEAL_TYPES), thirsty: false, budget: 30, patience: 30, speed: 2.1, side: chance(s, 0.5) ? 1 : 0, ...extra };
+    return { kind: id, name: r.name, look: r.look, craving: pick(s, cravings(s)), thirsty: false, budget: 30, patience: 30, speed: 2.1, side: chance(s, 0.5) ? 1 : 0, ...extra };
 }
 
 function scheduleArrivals(s) {
@@ -454,6 +487,13 @@ function scheduleArrivals(s) {
     if (N === f.criticNight || (N > NIGHT.campaignNights && (N - f.criticNight) % 5 === 0)) list.push({ t: T * rrange(s, 0.25, 0.7), spec: regularSpec(s, "critic", { budget: 40, patience: 26 }) });
     if (N === 4 && !f.poachDone && !s.rivalStall) list.push({ t: T * rrange(s, 0.3, 0.5), spec: regularSpec(s, "rival", { budget: 30, patience: 40 }) });
     if (N >= 2 && !f.dogShooed && (f.dogFriend || chance(s, 0.6))) list.push({ t: T * rrange(s, 0.2, 0.6), spec: regularSpec(s, "kid", { craving: "skewers", budget: 7, patience: 40, speed: 1.5 }) });
+    // the tour: Mrs. Park, and her whole group a few steps behind her
+    if (f.tourNightly || (N >= 6 && N % 2 === 0)) {
+        const t = T * rrange(s, 0.2, 0.45), side = chance(s, 0.5) ? 1 : 0;
+        list.push({ t, spec: regularSpec(s, "guide", { side, budget: 30, patience: 34, speed: 2.0 }) });
+        for (let i = 0; i < CUSTOMER.tourSize; i++) list.push({ t: t + 0.7 + i * 0.45, spec: { ...makeCustomerSpec(s), side, tour: true, speed: 2.0 } });
+    }
+    if (N >= 5 && (N === f.inspectNight || chance(s, 0.28))) list.push({ t: T * rrange(s, 0.3, 0.55), spec: regularSpec(s, "inspector", { noEat: true, speed: 1.8 }) });
     list.sort((a, b) => a.t - b.t);
     s.arrivals = list;
 }
@@ -463,7 +503,7 @@ function spawn(s, spec) {
     const c = {
         id: s.nextId++, ...spec, patienceMax: spec.patience, x: spec.side ? ends.right : ends.left, y: rrange(s, lane[0], lane[1]),
         fx: spec.side ? -1 : 1, fy: 0, state: "walk", wp: [], then: null, plan: [], stallId: null, atSpot: false, waited: 0, sats: [], spent: 0,
-        angry: false, happy: false, eatT: 0, lingerT: 0, hadDrink: false, holding: null, reviewed: false,
+        angry: false, happy: false, eatT: 0, lingerT: 0, hadDrink: false, holding: null, reviewed: false, seat: -1,
     };
     c.laneY = c.y;
     s.customers.push(c);
@@ -472,6 +512,13 @@ function spawn(s, spec) {
         s.stats.kid = true;
         const stalls = s.stalls.filter((t) => worker(s, t));
         for (let i = 0; i < 2 && stalls.length; i++) c.plan.push({ x: slotX(pick(s, stalls).slot) + rrange(s, -0.8, 0.8), y: STREET.laneY[1] + 0.9, linger: 11 });
+    } else if (c.kind === "guide") {
+        s.stats.tour = { size: CUSTOMER.tourSize, happy: 0, angry: 0 };
+    } else if (c.kind === "inspector") {
+        // he stands at up to three working stalls and watches
+        s.stats.inspector = { checked: 0, faults: [] };
+        const stalls = shuffle(s, s.stalls.filter((t) => worker(s, t))).slice(0, 3).sort((a, b) => (c.side ? b.slot - a.slot : a.slot - b.slot));
+        for (const t of stalls) c.plan.push({ x: slotX(t.slot) + 0.95, y: STREET.laneY[1] + 1.5, linger: 9, inspect: t.id });
     } else if (c.kind === "rival") {
         // he walks straight to your most skilled vendor and watches them work
         const best = s.stalls.map((t) => ({ t, v: worker(s, t) })).filter((x) => x.v).sort((a, b) => b.v.skill - a.v.skill || a.v.id - b.v.id)[0];
@@ -483,7 +530,8 @@ function spawn(s, spec) {
 /** What a customer does next: the next stop on their plan, otherwise decide what to eat. */
 function nextStep(s, c) {
     const p = c.plan.shift();
-    if (p) { c.lingerT = p.linger; c.scout = p.scout || null; walkTo(c, [[p.x, c.laneY], [p.x, p.y]], "linger"); return; }
+    if (p) { c.lingerT = p.linger; c.scout = p.scout || null; c.inspect = p.inspect ?? null; walkTo(c, [[p.x, c.laneY], [p.x, p.y]], "linger"); return; }
+    if (c.noEat) return leave(s, c);
     decide(s, c);
 }
 
@@ -520,7 +568,7 @@ function decide(s, c) {
     if (stall) return joinQueue(s, c, stall);
     // nothing here for them: they walk on through
     if (c.kind === "student") s.stats.studentSeen = true;
-    else if (!closing && !c.sats.length) { s.stats.walked++; addRep(s, ECON.repWalked); }
+    else if (!closing && !c.sats.length) { s.stats.walked++; addRep(s, ECON.repWalked); if (c.tour && s.stats.tour) s.stats.tour.angry++; }
     emit(s, { type: "walkby", id: c.id });
     leave(s, c);
 }
@@ -549,6 +597,7 @@ function finalize(s, c) {
     st.stars += stars; st.reviews++;
     addRep(s, (stars - 3) * ECON.repPerStar);
     c.happy = stars >= 4;
+    if (c.tour && st.tour && stars >= 4) st.tour.happy++;
     if (c.kind === "critic") st.critic = stars;
     if (c.kind === "landlord") st.landlord = { stars, wait: c.waited, angry: false };
     if (stars === 5 && c.servedBy) moment(s, true, c.kind === "n" ? 1 : 3, `${c.name} gave ${c.servedBy} five stars.`);
@@ -561,6 +610,7 @@ function leaveAngry(s, c, stall) {
     c.angry = true; c.reviewed = true;
     st.angry++; st.perStall[stall.id].angry++; st.stars += 1; st.reviews++;
     addRep(s, ECON.repAngry);
+    if (c.tour && st.tour) st.tour.angry++;
     if (c.kind === "critic") { st.critic = 0; st.criticVendor = stall.vendorId; }
     if (c.kind === "landlord") st.landlord = { stars: 0, wait: c.waited, angry: true };
     moment(s, false, c.kind === "n" ? 2 : 4, `${c.name} gave up on the ${STALLS[stall.type].name} queue after ${Math.round(c.waited)}s.`);
@@ -582,6 +632,7 @@ function completeServe(s, stall, c, v) {
     if (has(v, "penny")) sat += TRAITS.penny.sat;
     // the mood behind the counter reaches the food: friends side by side lift it, rivals sour it
     for (const n of neighbours(s, stall)) { const r = relation(s, v.id, n.vendor.id); sat += r === "friend" ? VENDOR.friendSat : r === "rival" ? VENDOR.rivalSat : 0; }
+    sat -= expectation(s);
     sat -= (c.waited / c.patienceMax) * 0.35;
     sat -= Math.max(0, ratio - 1) * 0.45;
     sat += Math.max(0, 1 - ratio) * 0.2;
@@ -606,9 +657,17 @@ function completeServe(s, stall, c, v) {
     emit(s, { type: "served", id: c.id, stallId: stall.id, vendorId: v.id, price, tip, stars, mistake: stall.mistake });
     stall.mistake = false;
 
-    // carry it to the eating area
+    // carry it to the nearest free stool, or eat standing if the tables are full
     const ends = streetEnds(s), eat = STREET.eatY;
-    const ex = clamp(c.x + rrange(s, -3.4, 3.4), ends.left + 2.5, ends.right - 2.5), ey = rrange(s, eat[0], eat[1]);
+    let ex = clamp(c.x + rrange(s, -3.4, 3.4), ends.left + 2.5, ends.right - 2.5), ey = rrange(s, eat[0], eat[1]);
+    let seat = -1, near = 7;
+    for (let k = 0, n = seatCount(s); k < n; k++) {
+        if (s.seats[k] != null) continue;
+        const d = Math.abs(seatSpot(k, SEAT).x - c.x);
+        if (d < near) { near = d; seat = k; }
+    }
+    if (seat >= 0) { seatSpot(seat, SEAT); ex = SEAT.x; ey = SEAT.y; s.seats[seat] = c.id; }
+    c.seat = seat;
     c.holding = stall.type; c.stallId = null;
     c.eatT = def.drink ? rrange(s, CUSTOMER.drink[0], CUSTOMER.drink[1]) : rrange(s, CUSTOMER.eat[0], CUSTOMER.eat[1]);
     walkTo(c, [[c.x + (c.x < ex ? 0.7 : -0.7), STREET.laneY[1] + 0.6], [ex, ey]], "eat");
@@ -616,6 +675,7 @@ function completeServe(s, stall, c, v) {
 
 function afterEating(s, c) {
     c.holding = null;
+    if (c.seat >= 0) { delete s.seats[c.seat]; c.seat = -1; }
     if (c.thirsty && !c.hadDrink && s.t * NIGHT.dt < NIGHT.seconds) {
         const stall = chooseStall(s, c, true);
         if (stall) { c.hadDrink = true; return joinQueue(s, c, stall); }
@@ -632,7 +692,19 @@ function move(c, tx, ty, step) {
     return false;
 }
 
-const SPOT = { x: 0, y: 0 };
+const SPOT = { x: 0, y: 0 }, SEAT = { x: 0, y: 0, tx: 0, ty: 0 };
+
+/** What the inspector writes down after standing at a stall. */
+function inspect(s, c) {
+    const stall = stallById(s, c.inspect), v = stall && worker(s, stall), ins = s.stats.inspector;
+    c.inspect = null;
+    if (!v || !ins) return;
+    ins.checked++;
+    const pv = s.stats.perVendor[v.id];
+    const why = stall.pauseT > 0 || pv.scenes ? "arguing in front of customers" : pv.mistakes ? "botched orders" : v.energy < VENDOR.tiredBelow ? "too tired to work safely" : null;
+    if (why) { ins.faults.push({ v: v.id, why }); moment(s, false, 3, `The inspector wrote ${v.name} up: ${why}.`); }
+    emit(s, { type: "inspect", id: c.id, vendorId: v.id, fault: !!why });
+}
 
 function stepCustomers(s, dt) {
     const patienceRate = mod(s, "patience") * managed(s, "marshal");
@@ -647,7 +719,11 @@ function stepCustomers(s, dt) {
                 c.wp.shift();
                 if (!c.wp.length) {
                     if (c.then === "queue") { c.state = "queue"; c.atSpot = true; c.fx = 0; c.fy = 1; }
-                    else if (c.then === "eat") { c.state = "eat"; }
+                    else if (c.then === "eat") {
+                        c.state = "eat";
+                        // sitting down: turn to the table
+                        if (c.seat >= 0) { seatSpot(c.seat, SEAT); const dx = SEAT.tx - c.x, dy = SEAT.ty - c.y, d = Math.hypot(dx, dy) || 1; c.fx = dx / d; c.fy = dy / d; }
+                    }
                     else if (c.then === "linger") { c.state = "linger"; c.fx = 0; c.fy = 1; if (c.kind === "kid") s.kidAt = c.x; if (c.scout) { s.flags.scouted = c.scout; emit(s, { type: "scout", id: c.id, vendorId: c.scout }); } }
                     else { s.customers.splice(i, 1); emit(s, { type: "gone", id: c.id }); }
                 }
@@ -666,7 +742,7 @@ function stepCustomers(s, dt) {
             if (c.eatT <= 0) afterEating(s, c);
         } else if (c.state === "linger") {
             c.lingerT -= dt;
-            if (c.lingerT <= 0) { if (c.kind === "kid") s.kidAt = null; c.scout = null; nextStep(s, c); }
+            if (c.lingerT <= 0) { if (c.kind === "kid") s.kidAt = null; c.scout = null; if (c.inspect != null) inspect(s, c); nextStep(s, c); }
         }
         // "served": standing at the counter until the stall finishes
     }
@@ -761,7 +837,9 @@ function finishNight(s) {
     const upkeep = s.stalls.reduce((n, t) => n + STALLS[t.type].upkeep, 0);
     const rent = s.rent;
     s.cash -= wages + upkeep + rent;
-    s.kidAt = null;
+    s.kidAt = null; s.seats = {};
+    const ins = st.inspector;
+    if (ins && ins.checked) s.flags.inspection = { n: ins.faults.length, v: ins.faults[0]?.v ?? null, why: ins.faults[0]?.why || "", checked: ins.checked };
 
     // reputation: the critic's verdict doubles the swing in the direction of her review
     let gain = st.repGain, loss = st.repLoss;
@@ -800,7 +878,7 @@ function finishNight(s) {
         night: s.night, revenue: st.revenue, tips: st.tips, ingredients: st.ingredients, wages, upkeep, rent, net, cash: s.cash,
         repBefore, repAfter: s.rep, served: st.served, angry: st.angry, walked: st.walked, expected: st.expected,
         avgStars: st.reviews ? st.stars / st.reviews : 0, best: sorted(true), worst: sorted(false), vendors: rows,
-        discovered: st.discovered, critic: st.critic, scenes: st.scenes.length, mistakes: st.mistakes,
+        discovered: st.discovered, critic: st.critic, scenes: st.scenes.length, mistakes: st.mistakes, weather: s.weather, expect: expectation(s),
     };
     s.history.push({ night: s.night, net, cash: s.cash, rep: s.rep, served: st.served });
     s.phase = "closing";
@@ -828,7 +906,12 @@ export function continueEndless(s) {
 function nextNight(s) {
     s.night++;
     s.phase = "prep";
-    if (s.rentFreeze > 0) s.rentFreeze--; else s.rent += s.rentStep;
+    if (s.rentFreeze > 0) s.rentFreeze--;
+    else s.rent += s.rentStep + (s.endless ? (s.night - NIGHT.campaignNights) * ECON.endlessRent : 0);
+    // tonight's weather: the festival comes round on its own, rain when it was forecast, otherwise the odd wet night
+    const wet = s.forecast === "rain" || (s.night >= WEATHER.from && chance(s, WEATHER.chance));
+    s.weather = s.night % WEATHER.festivalEvery === 0 ? "festival" : wet ? "rain" : "clear";
+    s.forecast = null;
     for (const m of s.mods) { if (m.fresh) m.fresh = false; else m.n--; }
     s.mods = s.mods.filter((m) => m.n > 0);
     for (const v of s.vendors) { v.energy = 100; v.tiredFlag = false; }
